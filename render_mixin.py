@@ -24,24 +24,12 @@ from constants import (
     TILE_SIZE,
     WIDTH,
 )
+from ui_text import draw_text_with_shadow as draw_text_with_shadow_shared
 
 
 class RenderMixin:
     def draw_text_with_shadow(self, screen, font, text, pos, color, center=False):
-        if not font:
-            return
-
-        shadow_surf = font.render(text, True, COLORS['SHADOW'])
-        text_surf = font.render(text, True, color)
-        if center:
-            text_rect = text_surf.get_rect(center=pos)
-            shadow_rect = shadow_surf.get_rect(center=(pos[0] + 1, pos[1] + 1))
-        else:
-            text_rect = text_surf.get_rect(topleft=pos)
-            shadow_rect = shadow_surf.get_rect(topleft=(pos[0] + 1, pos[1] + 1))
-
-        screen.blit(shadow_surf, shadow_rect)
-        screen.blit(text_surf, text_rect)
+        draw_text_with_shadow_shared(screen, font, text, pos, color, center=center)
 
     def draw_soldier_icon(self, screen, player, hp, center_pos):
         center_x, center_y = center_pos
@@ -504,7 +492,7 @@ class RenderMixin:
         button_w = 148
         button_h = 42
         button_x = ops_box.x + (ops_box.width - button_w) // 2
-        button_y = ops_box.y + 88
+        button_y = ops_box.y + 46
         self.end_turn_button = pygame.Rect(button_x, button_y, button_w, button_h)
         self.draw_stylish_button(
             screen,
@@ -517,7 +505,7 @@ class RenderMixin:
         help_button_w = 148
         help_button_h = 34
         help_button_x = ops_box.x + (ops_box.width - help_button_w) // 2
-        help_button_y = button_y + button_h + 10
+        help_button_y = button_y + button_h + 8
         self.help_button = pygame.Rect(help_button_x, help_button_y, help_button_w, help_button_h)
         help_hovered = (not self.show_help) and self.help_button.collidepoint(pygame.mouse.get_pos())
         help_pressed = now < self.help_button_press_until_ms
@@ -529,8 +517,28 @@ class RenderMixin:
             help_pressed,
             disabled=False,
         )
+        mode_button_w = 148
+        mode_button_h = 34
+        mode_button_x = ops_box.x + (ops_box.width - mode_button_w) // 2
+        mode_button_y = help_button_y + help_button_h + 6
+        self.mode_menu_button = pygame.Rect(mode_button_x, mode_button_y, mode_button_w, mode_button_h)
+        mode_hovered = (not self.show_help) and self.mode_menu_button.collidepoint(pygame.mouse.get_pos())
+        self.draw_stylish_button(
+            screen,
+            self.mode_menu_button,
+            '返回模式',
+            mode_hovered,
+            False,
+            disabled=False,
+        )
 
-        self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, 'H:帮助  R:重开  M:模式', (ops_box.x + 14, ops_box.y + 178), (184, 192, 208))
+        self.draw_text_with_shadow(
+            screen,
+            CHINESE_FONT_TINY,
+            'H:帮助  R:重开  M/Backspace:模式',
+            (ops_box.x + 14, ops_box.y + 178),
+            (184, 192, 208),
+        )
 
         tips = '左键选择 右键取消 滚轮日志 ESC退出'
         self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, tips, (ops_box.x + 14, ops_box.y + 194), (188, 194, 204))

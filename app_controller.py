@@ -15,6 +15,7 @@ from constants import (
     WIDTH,
 )
 from map_presets import DEFAULT_MAP_PRESET, MAP_PRESET_ORDER, MAP_PRESETS
+from ui_text import draw_text_with_shadow as draw_text_with_shadow_shared
 
 
 class App:
@@ -41,18 +42,7 @@ class App:
         self.pending_mode = None
 
     def draw_text_with_shadow(self, font, text, pos, color, center=False):
-        if not font:
-            return
-        shadow_surf = font.render(text, True, COLORS['SHADOW'])
-        text_surf = font.render(text, True, color)
-        if center:
-            text_rect = text_surf.get_rect(center=pos)
-            shadow_rect = shadow_surf.get_rect(center=(pos[0] + 1, pos[1] + 1))
-        else:
-            text_rect = text_surf.get_rect(topleft=pos)
-            shadow_rect = shadow_surf.get_rect(topleft=(pos[0] + 1, pos[1] + 1))
-        self.screen.blit(shadow_surf, shadow_rect)
-        self.screen.blit(text_surf, text_rect)
+        draw_text_with_shadow_shared(self.screen, font, text, pos, color, center=center)
 
     def draw_mode_button(self, rect, title, subtitle, hovered):
         base = (64, 104, 146)
@@ -244,7 +234,7 @@ class App:
                             map_preset_id=getattr(game, 'map_preset_id', DEFAULT_MAP_PRESET),
                         )
                         game = self.game
-                    elif event.key == pygame.K_m:
+                    elif event.key in (pygame.K_m, pygame.K_BACKSPACE):
                         self.pending_mode = None
                         self.game = None
                         break
@@ -278,6 +268,10 @@ class App:
                             game.help_button_press_until_ms = pygame.time.get_ticks() + 120
                             game.show_help = True
                             continue
+                        if (not game.show_help) and game.mode_menu_button.collidepoint(x, y):
+                            self.pending_mode = None
+                            self.game = None
+                            break
 
                         if not game.game_over and not game.show_help:
                             human_turn = game.is_human_turn()

@@ -1,4 +1,3 @@
-import sys
 from collections import deque
 
 import numpy as np
@@ -181,6 +180,7 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
         self.button_press_until_ms = 0
         self.help_button = pygame.Rect(BOARD_PIXEL_SIZE + 96, HEIGHT - 86, 128, 34)
         self.help_button_press_until_ms = 0
+        self.mode_menu_button = pygame.Rect(BOARD_PIXEL_SIZE + 96, HEIGHT - 46, 128, 34)
         
         # 可移动位置列表
         self.possible_moves = []
@@ -197,10 +197,11 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
         
         for i in range(BOARD_SIZE):
             for j in range(BOARD_SIZE):
+                is_neutral_city = self.board[i, j, 2] > 0 and self.board[i, j, 0] == 0
                 # 跳过已访问、水域、中立城市（中立城市本身不可归属）
                 if (visited[i, j] or 
                     self.terrain[i][j] == TERRAIN_WATER or 
-                    self.board[i, j, 2] > 0):  # 中立城市（city>0 且 owner=0）
+                    is_neutral_city):
                     continue
                     
                 region = []
@@ -237,7 +238,7 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
                         if self.terrain[nx][ny] == TERRAIN_WATER:
                             continue
                         # 中立城市视为封闭
-                        if self.board[nx, ny, 2] > 0:
+                        if self.board[nx, ny, 2] > 0 and self.board[nx, ny, 0] == 0:
                             continue
                         
                         n_owner = self.board[nx, ny, 0]
@@ -379,6 +380,97 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
     def calculate_possible_moves(self, pos):
         """计算并存储可能的移动位置"""
         self.possible_moves = self.get_possible_moves_for(pos)
+
+    def _resolve_move_on_state(
+        self,
+        board_state,
+        move_count_state,
+        from_pos,
+        to_pos,
+        actor,
+        steps_left,
+        copy_state=False,
+    ):
+        """共享移动结算：可用于真实对局与AI模拟。"""
+        x1, y1 = from_pos
+        x2, y2 = to_pos
+        board_limit = board_state.shape[0]
+
+        if not (0 <= x1 < board_limit and 0 <= y1 < board_limit):
+            return None, "起始位置超出边界"
+
+        terrain_cost, terrain_error = self.get_terrain_cost(from_pos, to_pos)
+        if terrain_error:
+            return None, terrain_error
+
+        source_player, source_hp, source_city_type, _ = board_state[x1, y1]
+        if source_player != actor:
+            return None, "只能移动自己士兵"
+        if source_hp <= 0:
+            return None, "该位置没有可移动士兵"
+
+        source_move_count = move_count_state[x1, y1]
+        if source_move_count >= 3:
+            return None, "该士兵本回合已移动3次"
+
+        target_player, target_hp, target_city_type, _ = board_state[x2, y2]
+        target_move_count = move_count_state[x2, y2]
+        if target_player == actor and target_hp > 0:
+            return None, "不能移动到己方士兵位置"
+
+        if steps_left < terrain_cost:
+            return None, f"行动点不足! 需要{terrain_cost}点"
+
+        board_next = board_state.copy() if copy_state else board_state
+        move_count_next = move_count_state.copy() if copy_state else move_count_state
+
+        attacker_survived = False
+        defender_survived = False
+        survivor_hp = 0
+        attack_damage = 0
+
+        if target_player != 0 and target_hp > 0:
+            attack_damage = min(source_hp, target_hp)
+            if source_hp > target_hp:
+                survivor_hp = source_hp - target_hp
+                board_next[x2, y2] = [actor, survivor_hp, target_city_type, 0]
+                attacker_survived = True
+            elif source_hp < target_hp:
+                survivor_hp = target_hp - source_hp
+                board_next[x2, y2] = [target_player, survivor_hp, target_city_type, 0]
+                defender_survived = True
+            else:
+                board_next[x2, y2] = [0, 0, target_city_type, 0]
+        else:
+            survivor_hp = source_hp
+            board_next[x2, y2] = [actor, survivor_hp, target_city_type, 0]
+            attacker_survived = True
+
+        board_next[x1, y1] = [source_player, 0, source_city_type, 0]
+
+        move_count_next[x1, y1] = 0
+        if attacker_survived:
+            move_count_next[x2, y2] = source_move_count + 1
+        else:
+            move_count_next[x2, y2] = target_move_count
+
+        if attacker_survived and self.terrain[x2][y2] != TERRAIN_WATER:
+            board_next[x2, y2, 0] = actor
+
+        return {
+            'board': board_next,
+            'move_count': move_count_next,
+            'terrain_cost': terrain_cost,
+            'source_player': int(source_player),
+            'source_hp': int(source_hp),
+            'target_player': int(target_player),
+            'target_hp': int(target_hp),
+            'target_city_type': int(target_city_type),
+            'attacker_survived': attacker_survived,
+            'defender_survived': defender_survived,
+            'survivor_hp': int(survivor_hp),
+            'attack_damage': int(attack_damage),
+        }, None
     
     def is_human_turn(self):
         return (not self.game_over) and (self.current_player in self.human_players)
@@ -419,92 +511,52 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
                     self.board[i, j, 1] = 0
     
     def move_soldier(self, from_pos, to_pos):
-        x1, y1 = from_pos
         x2, y2 = to_pos
-        
-        if not (0 <= x1 < BOARD_SIZE and 0 <= y1 < BOARD_SIZE):
-            return False, "起始位置超出边界"
-        
-        terrain_cost, terrain_error = self.get_terrain_cost(from_pos, to_pos)
-        if terrain_error:
-            return False, terrain_error
-        
-        # 获取棋子信息
-        player, hp, city_type, unit_type = self.board[x1, y1]
-        
-        # 只能移动当前玩家的棋子
-        if player != self.current_player:
-            return False, "只能移动自己士兵"
-        if hp <= 0:
-            return False, "该位置没有可移动士兵"
-            
-        # 检查士兵移动次数
-        move_count = self.move_count_grid[x1, y1]
-        if move_count >= 3:
-            return False, "该士兵本回合已移动3次"
-        
-        # 获取目标位置信息
-        target_player, target_hp, target_city_type, target_unit_type = self.board[x2, y2]
-        target_move_count = self.move_count_grid[x2, y2]
-        
-        # 检查是否移动到自己领土（非战斗）
-        if target_player == player and target_hp > 0:
-            return False, "不能移动到己方士兵位置"
-        
-        # 检查是否有足够行动点
-        if self.steps_left < terrain_cost:
-            return False, f"行动点不足! 需要{terrain_cost}点"
-        
-        # 移动棋子
-        attacker_survived = False
+        resolved, error = self._resolve_move_on_state(
+            self.board,
+            self.move_count_grid,
+            from_pos,
+            to_pos,
+            self.current_player,
+            self.steps_left,
+            copy_state=False,
+        )
+        if error:
+            return False, error
+
+        player = resolved['source_player']
+        target_player = resolved['target_player']
+        target_hp = resolved['target_hp']
+        attacker_survived = resolved['attacker_survived']
+        defender_survived = resolved['defender_survived']
+        survivor_hp = resolved['survivor_hp']
+        terrain_cost = resolved['terrain_cost']
+
         attack_damage_text = None
         if target_player != 0 and target_hp > 0:
-            attack_damage_text = f"-{min(hp, target_hp)}"
-            if hp > target_hp:
-                new_hp = hp - target_hp
-                self.board[x2, y2] = [player, new_hp, target_city_type, 0]
-                self.log.append(f"玩家{player}在({y2},{x2})击败玩家{target_player}, 剩余血量{new_hp}")
-                attacker_survived = True
-            elif hp < target_hp:
-                new_hp = target_hp - hp
-                self.board[x2, y2] = [target_player, new_hp, target_city_type, 0]
-                self.log.append(f"玩家{target_player}在({y2},{x2})防守成功, 剩余血量{new_hp}")
+            attack_damage_text = f"-{resolved['attack_damage']}"
+            if attacker_survived:
+                self.log.append(f"玩家{player}在({y2},{x2})击败玩家{target_player}, 剩余血量{survivor_hp}")
+            elif defender_survived:
+                self.log.append(f"玩家{target_player}在({y2},{x2})防守成功, 剩余血量{survivor_hp}")
             else:
-                self.board[x2, y2] = [0, 0, target_city_type, 0]
                 self.log.append(f"玩家{player}和玩家{target_player}在({y2},{x2})同归于尽")
         else:
-            self.board[x2, y2] = [player, hp, target_city_type, 0]
             self.log.append(f"玩家{player}移动士兵到({y2},{x2})")
-            attacker_survived = True
-        
-        # 清除原位置士兵
-        current_player, _, city_type, _ = self.board[x1, y1]
-        self.board[x1, y1] = [current_player, 0, city_type, 0]
-        
+
         # 记录移动历史
         self.move_history.append((from_pos, to_pos))
-        
-        # 更新移动计数
-        self.move_count_grid[x1, y1] = 0
-        if attacker_survived:
-            self.move_count_grid[x2, y2] = move_count + 1
-        else:
-            self.move_count_grid[x2, y2] = target_move_count
-        
+
         # 消耗行动点
         self.steps_left -= terrain_cost
-        
-        # 更新领土
-        if attacker_survived and self.terrain[x2][y2] != TERRAIN_WATER:
-            self.board[x2, y2, 0] = player
-        
+
         if attack_damage_text:
             self.add_combat_effect((x2, y2), attack_damage_text)
-        
+
         if attacker_survived:
             animated_hp = int(self.board[x2, y2, 1])
             self.add_move_animation(from_pos, to_pos, player, animated_hp)
-        
+
         # 检查首都是否被占领
         eliminated = []
         for p, pos in self.capitals.items():
@@ -631,12 +683,9 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
         return self.log[start:end], max_scroll
 
 def main():
-    from app_controller import App
+    from launcher import run_app
 
-    app = App(Game)
-    app.run()
-    pygame.quit()
-    sys.exit()
+    run_app(Game)
 
 
 if __name__ == '__main__':

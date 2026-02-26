@@ -8,7 +8,6 @@ from constants import (
     CITY_MAJOR,
     CITY_SMALL,
     RESOURCE_GOLD_MINE,
-    TERRAIN_WATER,
 )
 
 
@@ -120,73 +119,50 @@ class AIMixin:
 
         return max_threat_hp
 
+    def estimate_mine_production_gain(self, board_state, pos, player):
+        x, y = pos
+        if self.resource_map[x, y] != RESOURCE_GOLD_MINE:
+            return 0
+
+        owner, hp, _, _ = board_state[x, y]
+        if owner != player:
+            return 0
+
+        if hp > 0:
+            return max(0, min(5, 99 - int(hp)))
+        return 5
+
     def simulate_ai_move(self, player, from_pos, to_pos, board_state, move_count_state, steps_left):
-        x1, y1 = from_pos
+        resolved, error = self._resolve_move_on_state(
+            board_state,
+            move_count_state,
+            from_pos,
+            to_pos,
+            player,
+            steps_left,
+            copy_state=True,
+        )
+        if error:
+            return None
+
         x2, y2 = to_pos
-        source_player, source_hp, source_city_type, _ = board_state[x1, y1]
-
-        if source_player != player or source_hp <= 0:
-            return None
-        if move_count_state[x1, y1] >= 3:
-            return None
-
-        terrain_cost, terrain_error = self.get_terrain_cost(from_pos, to_pos)
-        if terrain_error or terrain_cost > steps_left:
-            return None
-
-        target_player, target_hp, target_city_type, _ = board_state[x2, y2]
-        if target_player == player and target_hp > 0:
-            return None
-
-        board_copy = board_state.copy()
-        move_count_copy = move_count_state.copy()
-        move_count = move_count_copy[x1, y1]
-
-        attacker_survived = False
-        survivor_hp = 0
-        defender_survived = False
-
-        if target_player != 0 and target_hp > 0:
-            if source_hp > target_hp:
-                survivor_hp = source_hp - target_hp
-                board_copy[x2, y2] = [player, survivor_hp, target_city_type, 0]
-                attacker_survived = True
-            elif source_hp < target_hp:
-                survivor_hp = target_hp - source_hp
-                board_copy[x2, y2] = [target_player, survivor_hp, target_city_type, 0]
-                defender_survived = True
-            else:
-                board_copy[x2, y2] = [0, 0, target_city_type, 0]
-        else:
-            survivor_hp = source_hp
-            board_copy[x2, y2] = [player, survivor_hp, target_city_type, 0]
-            attacker_survived = True
-
-        board_copy[x1, y1] = [source_player, 0, source_city_type, 0]
-
-        move_count_copy[x1, y1] = 0
-        if attacker_survived:
-            move_count_copy[x2, y2] = move_count + 1
-        else:
-            move_count_copy[x2, y2] = move_count_state[x2, y2]
-
-        if attacker_survived and self.terrain[x2][y2] != TERRAIN_WATER:
-            board_copy[x2, y2, 0] = player
-
+        attacker_survived = resolved['attacker_survived']
+        target_player = resolved['target_player']
+        target_city_type = resolved['target_city_type']
         captured_city = attacker_survived and target_city_type > 0 and target_player != player
         captured_capital = captured_city and target_city_type == CITY_CAPITAL
 
         return {
-            'board': board_copy,
-            'move_count': move_count_copy,
-            'steps_left': steps_left - terrain_cost,
-            'terrain_cost': terrain_cost,
+            'board': resolved['board'],
+            'move_count': resolved['move_count'],
+            'steps_left': steps_left - resolved['terrain_cost'],
+            'terrain_cost': resolved['terrain_cost'],
             'attacker_survived': attacker_survived,
-            'defender_survived': defender_survived,
-            'survivor_hp': survivor_hp,
-            'source_hp': int(source_hp),
+            'defender_survived': resolved['defender_survived'],
+            'survivor_hp': resolved['survivor_hp'],
+            'source_hp': resolved['source_hp'],
             'target_player': int(target_player),
-            'target_hp': int(target_hp),
+            'target_hp': resolved['target_hp'],
             'target_city_type': int(target_city_type),
             'captured_city': captured_city,
             'captured_capital': captured_capital,
@@ -230,12 +206,20 @@ class AIMixin:
             else:
                 score += 24
 
-        # 金矿价值：优先抢占中立/敌方矿点。
+        # 金矿价值：按“下一轮预期产兵增量”打分，优先高产矿。
         if target_has_mine:
-            if target_is_neutral_mine:
-                score += 96
-            elif target_is_enemy_mine:
-                score += 152
+            mine_gain = self.estimate_mine_production_gain(simulated['board'], to_pos, player)
+            if attacker_survived and mine_gain > 0:
+                if target_is_enemy_mine:
+                    score += 132
+                elif target_is_neutral_mine:
+                    score += 92
+                else:
+                    # 己方空矿补驻军同样有价值
+                    score += 72
+                score += mine_gain * 42
+                if mine_gain == 5:
+                    score += 28
 
         # 城市/首都价值
         if simulated['captured_capital']:
