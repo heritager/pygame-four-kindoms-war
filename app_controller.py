@@ -17,6 +17,8 @@ from constants import (
 
 class App:
     def __init__(self, game_class):
+        if not pygame.get_init():
+            pygame.init()
         self.game_class = game_class
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption('四国争霸')

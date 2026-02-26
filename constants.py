@@ -1,6 +1,6 @@
 import pygame
 
-pygame.init()
+pygame.font.init()
 
 
 def get_font(size):
