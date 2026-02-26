@@ -78,18 +78,38 @@ def noise(x, y):
 
 
 class MapGenerationMixin:
+    def get_map_setting(self, key_path, default):
+        node = getattr(self, 'map_preset', None)
+        if not isinstance(node, dict):
+            return default
+
+        for key in key_path:
+            if not isinstance(node, dict) or key not in node:
+                return default
+            node = node[key]
+        return node
+
     def generate_terrain(self):
         """简化的地形生成"""
         self.terrain = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
-        noise_map = generate_perlin_noise(BOARD_SIZE, BOARD_SIZE, scale=6.0)
+        scale = float(self.get_map_setting(('terrain', 'scale'), 6.0))
+        water_threshold = float(self.get_map_setting(('terrain', 'water_threshold'), 0.25))
+        mountain_threshold = float(self.get_map_setting(('terrain', 'mountain_threshold'), 0.35))
+        forest_threshold = float(self.get_map_setting(('terrain', 'forest_threshold'), 0.60))
+        scale = max(1.0, scale)
+        water_threshold = max(0.0, min(0.9, water_threshold))
+        mountain_threshold = max(water_threshold + 0.01, min(0.95, mountain_threshold))
+        forest_threshold = max(mountain_threshold + 0.01, min(0.99, forest_threshold))
+
+        noise_map = generate_perlin_noise(BOARD_SIZE, BOARD_SIZE, scale=scale)
 
         for i in range(BOARD_SIZE):
             for j in range(BOARD_SIZE):
-                if noise_map[i][j] < 0.25:
+                if noise_map[i][j] < water_threshold:
                     self.terrain[i][j] = TERRAIN_WATER
-                elif noise_map[i][j] < 0.35:
+                elif noise_map[i][j] < mountain_threshold:
                     self.terrain[i][j] = TERRAIN_MOUNTAIN
-                elif noise_map[i][j] < 0.6:
+                elif noise_map[i][j] < forest_threshold:
                     self.terrain[i][j] = TERRAIN_FOREST
                 else:
                     self.terrain[i][j] = TERRAIN_PLAIN
@@ -120,9 +140,9 @@ class MapGenerationMixin:
                         self.terrain[i][j] = TERRAIN_PLAIN if random.random() < 0.8 else TERRAIN_FOREST
 
         # 硬约束：控制每个国家分区水域上限、山地上限和平原下限。
-        max_zone_water_ratio = 0.28
-        max_zone_mountain_ratio = 0.20
-        min_zone_plain_ratio = 0.32
+        max_zone_water_ratio = float(self.get_map_setting(('fairness', 'max_zone_water_ratio'), 0.28))
+        max_zone_mountain_ratio = float(self.get_map_setting(('fairness', 'max_zone_mountain_ratio'), 0.20))
+        min_zone_plain_ratio = float(self.get_map_setting(('fairness', 'min_zone_plain_ratio'), 0.32))
         for player, cells in zone_cells.items():
             cap_x, cap_y = capital_map[player]
 
@@ -234,7 +254,13 @@ class MapGenerationMixin:
                 home_small_guaranteed[player] = 1
 
         max_cities = int(BOARD_SIZE * BOARD_SIZE / 10)
-        target_total_cities = random.randint(max_cities // 2, max_cities)
+        min_fill_ratio = float(self.get_map_setting(('city', 'min_fill_ratio'), 0.50))
+        max_fill_ratio = float(self.get_map_setting(('city', 'max_fill_ratio'), 1.00))
+        min_fill_ratio = max(0.1, min(1.0, min_fill_ratio))
+        max_fill_ratio = max(min_fill_ratio, min(1.0, max_fill_ratio))
+        min_cities = int(max_cities * min_fill_ratio)
+        max_city_target = int(max_cities * max_fill_ratio)
+        target_total_cities = random.randint(min_cities, max_city_target)
         guaranteed_total = sum(home_small_guaranteed.values())
         num_cities = max(0, target_total_cities - guaranteed_total)
         zone_available = {
@@ -294,11 +320,13 @@ class MapGenerationMixin:
             forest_cells = zone_forest[player]
             mountain_cells = zone_mountain[player]
 
+            major_ratio = float(self.get_map_setting(('city', 'major_ratio'), 0.35))
+            forest_small_ratio = float(self.get_map_setting(('city', 'forest_small_ratio'), 0.30))
             min_major = 1 if quota >= 3 else 0
-            major_count = min(max(int(quota * 0.35), min_major), len(plain_cells))
+            major_count = min(max(int(quota * major_ratio), min_major), len(plain_cells))
             small_needed = quota - major_count
 
-            forest_small = min(int(small_needed * 0.30), len(forest_cells))
+            forest_small = min(int(small_needed * forest_small_ratio), len(forest_cells))
             plain_small = min(small_needed - forest_small, max(0, len(plain_cells) - major_count))
 
             remaining_small = small_needed - forest_small - plain_small
@@ -361,15 +389,21 @@ class MapGenerationMixin:
         for player in players:
             random.shuffle(zone_candidates[player])
 
-        mine_count = random.randint(2, 3)
+        min_mine_count = int(self.get_map_setting(('mine', 'min_count'), 2))
+        max_mine_count = int(self.get_map_setting(('mine', 'max_count'), 3))
+        if min_mine_count > max_mine_count:
+            min_mine_count, max_mine_count = max_mine_count, min_mine_count
+        mine_count = random.randint(min_mine_count, max_mine_count)
         selected = []
         zone_mine_count = {player: 0 for player in players}
         selected_set = set()
+        primary_distances = self.get_map_setting(('mine', 'primary_min_distances'), [7, 5, 3]) or [7, 5, 3]
+        fallback_distances = self.get_map_setting(('mine', 'fallback_min_distances'), [3, 1, 0]) or [3, 1, 0]
 
         # 第一阶段：尽量每个分区最多1个，且彼此保持一定距离。
         available_zones = [player for player in players if zone_candidates[player]]
         random.shuffle(available_zones)
-        for min_distance in (7, 5, 3):
+        for min_distance in primary_distances:
             for player in available_zones:
                 if len(selected) >= mine_count:
                     break
@@ -396,7 +430,7 @@ class MapGenerationMixin:
                         fallback.append((player, pos))
             random.shuffle(fallback)
 
-            for min_distance in (3, 1, 0):
+            for min_distance in fallback_distances:
                 for player, pos in fallback:
                     if len(selected) >= mine_count:
                         break

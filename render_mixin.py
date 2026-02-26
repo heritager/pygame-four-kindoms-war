@@ -435,6 +435,7 @@ class RenderMixin:
             self.draw_text_with_shadow(screen, CHINESE_FONT_SMALL, f'第 {self.round_count} 轮', (status_box.x + 12, status_box.y + 40), (224, 228, 236))
             self.draw_text_with_shadow(screen, CHINESE_FONT_SMALL, f'行动点: {self.steps_left}', (status_box.x + 12, status_box.y + 66), (214, 220, 230))
             self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, f'模式: {MODE_LABELS.get(self.game_mode, self.game_mode)}', (status_box.x + 12, status_box.y + 88), (180, 190, 206))
+            self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, f'关卡: {getattr(self, "map_name", "默认")}', (status_box.x + 12, status_box.y + 106), (180, 190, 206))
         elif self.winner:
             self.draw_text_with_shadow(screen, CHINESE_FONT_MEDIUM, f'胜利者: 玩家{self.winner}', (status_box.x + 12, status_box.y + 10), COLORS[self.winner])
         else:

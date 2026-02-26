@@ -21,14 +21,18 @@ from constants import (
     TERRAIN_MOUNTAIN,
     TERRAIN_WATER,
 )
+from map_presets import DEFAULT_MAP_PRESET, get_map_preset
 from map_generation import MapGenerationMixin
 from render_mixin import RenderMixin
 
 
 class Game(MapGenerationMixin, AIMixin, RenderMixin):
-    def __init__(self, game_mode=MODE_SINGLE_AI):
+    def __init__(self, game_mode=MODE_SINGLE_AI, map_preset_id=DEFAULT_MAP_PRESET):
         self.game_mode = game_mode
         self.primary_human = 1
+        self.map_preset = get_map_preset(map_preset_id)
+        self.map_preset_id = self.map_preset['id']
+        self.map_name = self.map_preset['name']
         self.reset_game()
         
     def reset_game(self):
@@ -103,8 +107,12 @@ class Game(MapGenerationMixin, AIMixin, RenderMixin):
         self.combat_effects = []
         
         # 游戏日志
-        self.log = [f"游戏开始! 模式: {MODE_LABELS.get(self.game_mode, self.game_mode)}", "四位玩家轮流进行游戏", 
-                   f"第{self.round_count}轮开始, 每位玩家每回合{self.steps_per_turn}步"]
+        self.log = [
+            f"游戏开始! 模式: {MODE_LABELS.get(self.game_mode, self.game_mode)}",
+            f"地图关卡: {self.map_name}",
+            "四位玩家轮流进行游戏",
+            f"第{self.round_count}轮开始, 每位玩家每回合{self.steps_per_turn}步",
+        ]
         self.log.append(
             "城市分布: 保底小城{} 平原大城{} 平原小城{} 森林小城{} 山地小城{}".format(
                 self.city_distribution_summary["home_small"],
