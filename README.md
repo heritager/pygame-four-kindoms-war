@@ -96,15 +96,18 @@
 
 ## 游戏模式
 
-### 1. 统一主入口 (Game.py)
+### 1. 统一主入口 (game_main.py)
 
 启动后可在菜单中选择两种模式：
 - 4人本地对战（Hotseat）
 - 1人对战3个AI（Single vs AI）
 
-### 2. 兼容单人入口 (Single_Game.py)
+### 2. 单人入口 (single_mode_main.py)
 
-保留旧入口命令以兼容习惯用法；内部已复用统一架构，直接进入“1人对战3个AI”模式。
+直接进入“1人对战3个AI”模式。
+
+兼容说明：
+- `Game.py` 与 `Single_Game.py` 仍可启动，但仅作为兼容转发入口。
 
 ## 游戏规则
 
@@ -172,14 +175,14 @@
 
 ## 操作说明
 
-### 多人模式 (Game.py)
+### 多人模式 (game_main.py)
 
 - **鼠标左键**：点击选择士兵，点击目标位置移动
 - **结束回合按钮**：主动结束当前回合
 - **R键**：重新开始游戏
 - **ESC键**：退出游戏
 
-### 单人模式 (Single_Game.py)
+### 单人模式 (single_mode_main.py)
 
 - **鼠标左键**：点击选择士兵，点击目标位置移动
 - **结束回合按钮**：主动结束当前回合
@@ -244,9 +247,13 @@
 3. 运行游戏：
    ```bash
    # 统一入口（推荐）：启动后在菜单中选模式
-   python3 Game.py
+   python3 game_main.py
 
-   # 兼容入口：直接进入单人AI模式
+   # 单人入口：直接进入单人AI模式
+   python3 single_mode_main.py
+
+   # 旧命名入口（兼容）
+   python3 Game.py
    python3 Single_Game.py
    ```
 
@@ -288,13 +295,15 @@
 
 ```
 .
-├── Game.py              # 游戏核心逻辑（主入口）
+├── game_main.py         # 统一主入口 + 游戏核心逻辑
+├── single_mode_main.py  # 单人模式入口
 ├── app_controller.py    # 应用循环与模式菜单
 ├── ai_logic.py          # AI决策逻辑
 ├── map_generation.py    # 地形/城市/金矿生成
 ├── render_mixin.py      # 渲染与HUD
 ├── constants.py         # 常量与颜色配置
-├── Single_Game.py       # 兼容单人入口（复用主架构）
+├── Game.py              # 兼容旧入口（转发到 game_main.py）
+├── Single_Game.py       # 兼容旧入口（转发到 single_mode_main.py）
 ├── README.md            # 项目文档
 └── requirements.txt     # 依赖库列表
 ```
