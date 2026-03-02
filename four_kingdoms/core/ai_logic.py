@@ -1,8 +1,13 @@
 import random
 
+import numpy as np
 import pygame
 
-from constants import (
+from ..config.constants import (
+    AI_DIFFICULTY_EASY,
+    AI_DIFFICULTY_HARD,
+    AI_DIFFICULTY_LABELS,
+    AI_DIFFICULTY_NORMAL,
     BOARD_SIZE,
     CITY_CAPITAL,
     CITY_MAJOR,
@@ -170,7 +175,7 @@ class AIMixin:
             'to_pos': to_pos,
         }
 
-    def score_ai_move(self, player, from_pos, to_pos, board_state, move_count_state, steps_left):
+    def score_ai_move(self, player, from_pos, to_pos, board_state, move_count_state, steps_left, add_noise=True):
         simulated = self.simulate_ai_move(player, from_pos, to_pos, board_state, move_count_state, steps_left)
         if simulated is None:
             return -10**9, None
@@ -302,8 +307,9 @@ class AIMixin:
         # 行动点效率
         score -= (simulated['terrain_cost'] - 1) * 9
 
-        # 轻微随机打破同分
-        score += random.random() * 0.2
+        # 普通/简单难度允许轻微随机打破同分；困难模式会关闭噪声。
+        if add_noise:
+            score += random.random() * 0.2
         return score, simulated
 
     def enumerate_ai_actions(self, player, board_state, move_count_state, steps_left):
@@ -329,7 +335,176 @@ class AIMixin:
         scored.sort(reverse=True)
         return scored[0] if len(scored) <= limit else scored[:limit][0]
 
-    def choose_ai_action(self, player):
+    def evaluate_board_state(self, player, board_state):
+        own_capital = self.capitals.get(player)
+        if own_capital is not None and board_state[own_capital[0], own_capital[1], 0] != player:
+            return -10**8
+
+        score = 0.0
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                owner, hp, city_type, _ = board_state[i, j]
+                has_mine = self.resource_map[i, j] == RESOURCE_GOLD_MINE
+                hp = int(hp)
+
+                if owner == player:
+                    score += 6 + hp * 1.35
+                    if city_type == CITY_CAPITAL:
+                        score += 260
+                    elif city_type == CITY_MAJOR:
+                        score += 72
+                    elif city_type == CITY_SMALL:
+                        score += 40
+                    if has_mine:
+                        score += 98
+                elif owner > 0:
+                    score -= 4 + hp * 1.1
+                    if city_type == CITY_CAPITAL:
+                        score -= 200
+                    elif city_type == CITY_MAJOR:
+                        score -= 52
+                    elif city_type == CITY_SMALL:
+                        score -= 28
+                    if has_mine:
+                        score -= 72
+
+        enemy_caps_alive = 0
+        for enemy, cap_pos in self.capitals.items():
+            if enemy == player:
+                continue
+            if board_state[cap_pos[0], cap_pos[1], 0] == enemy:
+                enemy_caps_alive += 1
+        score += (3 - enemy_caps_alive) * 180
+        return score
+
+    def _rank_actions_for_player(
+        self,
+        player,
+        board_state,
+        move_count_state,
+        steps_left,
+        limit=16,
+        add_noise=True,
+    ):
+        ranked = []
+        for from_pos, to_pos in self.enumerate_ai_actions(player, board_state, move_count_state, steps_left):
+            action_score, simulated = self.score_ai_move(
+                player,
+                from_pos,
+                to_pos,
+                board_state,
+                move_count_state,
+                steps_left,
+                add_noise=add_noise,
+            )
+            if simulated is None:
+                continue
+            ranked.append((action_score, from_pos, to_pos, simulated))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[:limit]
+
+    def _rank_enemy_counter_actions(self, player, board_state, per_enemy_limit=3):
+        enemy_steps = self.calculate_steps_per_turn()
+        enemy_move_count = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
+        counters = []
+
+        for enemy in self.players:
+            if enemy == player:
+                continue
+            ranked = self._rank_actions_for_player(
+                enemy,
+                board_state,
+                enemy_move_count,
+                enemy_steps,
+                limit=per_enemy_limit,
+                add_noise=False,
+            )
+            for action_score, from_pos, to_pos, simulated in ranked:
+                counters.append((action_score, enemy, from_pos, to_pos, simulated))
+
+        counters.sort(key=lambda item: item[0], reverse=True)
+        return counters
+
+    def _alphabeta_value(self, player, board_state, move_count_state, steps_left, depth, alpha, beta, maximizing):
+        if depth <= 0:
+            return self.evaluate_board_state(player, board_state)
+
+        if maximizing:
+            ranked = self._rank_actions_for_player(
+                player,
+                board_state,
+                move_count_state,
+                steps_left,
+                limit=8,
+                add_noise=False,
+            )
+            if not ranked:
+                return self.evaluate_board_state(player, board_state)
+
+            value = -10**9
+            for _, _, _, simulated in ranked:
+                child_value = self._alphabeta_value(
+                    player,
+                    simulated['board'],
+                    simulated['move_count'],
+                    simulated['steps_left'],
+                    depth - 1,
+                    alpha,
+                    beta,
+                    maximizing=False,
+                )
+                if child_value > value:
+                    value = child_value
+                if value > alpha:
+                    alpha = value
+                if beta <= alpha:
+                    break
+            return value
+
+        counters = self._rank_enemy_counter_actions(player, board_state, per_enemy_limit=3)
+        if not counters:
+            return self.evaluate_board_state(player, board_state)
+
+        value = 10**9
+        for _, _, _, _, simulated in counters:
+            child_value = self._alphabeta_value(
+                player,
+                simulated['board'],
+                simulated['move_count'],
+                steps_left,
+                depth - 1,
+                alpha,
+                beta,
+                maximizing=True,
+            )
+            if child_value < value:
+                value = child_value
+            if value < beta:
+                beta = value
+            if beta <= alpha:
+                break
+        return value
+
+    def choose_ai_action_easy(self, player):
+        ranked = self._rank_actions_for_player(
+            player,
+            self.board,
+            self.move_count_grid,
+            self.steps_left,
+            limit=12,
+            add_noise=True,
+        )
+        if not ranked:
+            return None, None
+
+        top_pool_size = max(2, min(6, len(ranked)))
+        pool = ranked[:top_pool_size]
+        weights = [top_pool_size - idx for idx in range(top_pool_size)]
+        picked = random.choices(pool, weights=weights, k=1)[0]
+        return (picked[1], picked[2]), picked[0]
+
+    def choose_ai_action_normal(self, player):
         first_actions = self.enumerate_ai_actions(player, self.board, self.move_count_grid, self.steps_left)
         if not first_actions:
             return None, None
@@ -368,6 +543,51 @@ class AIMixin:
 
         return best_action, best_total_score
 
+    def choose_ai_action_hard(self, player):
+        ranked = self._rank_actions_for_player(
+            player,
+            self.board,
+            self.move_count_grid,
+            self.steps_left,
+            limit=10,
+            add_noise=False,
+        )
+        if not ranked:
+            return None, None
+
+        best_action = None
+        best_value = -10**9
+        alpha = -10**9
+        beta = 10**9
+
+        for immediate_score, from_pos, to_pos, simulated in ranked:
+            reply_value = self._alphabeta_value(
+                player,
+                simulated['board'],
+                simulated['move_count'],
+                simulated['steps_left'],
+                depth=1,
+                alpha=alpha,
+                beta=beta,
+                maximizing=False,
+            )
+            combined = reply_value + immediate_score * 0.2
+            if combined > best_value:
+                best_value = combined
+                best_action = (from_pos, to_pos)
+            if best_value > alpha:
+                alpha = best_value
+
+        return best_action, best_value
+
+    def choose_ai_action(self, player):
+        difficulty = getattr(self, 'ai_difficulty', AI_DIFFICULTY_NORMAL)
+        if difficulty == AI_DIFFICULTY_EASY:
+            return self.choose_ai_action_easy(player)
+        if difficulty == AI_DIFFICULTY_HARD:
+            return self.choose_ai_action_hard(player)
+        return self.choose_ai_action_normal(player)
+
     def perform_ai_action(self):
         if self.current_player not in self.ai_players:
             return False
@@ -380,7 +600,8 @@ class AIMixin:
 
         success, message = self.move_soldier(best_action[0], best_action[1])
         if success:
-            self.log.append(f'玩家{self.current_player}(AI)行动: {message} (评估{plan_score:.1f})')
+            difficulty = AI_DIFFICULTY_LABELS.get(getattr(self, 'ai_difficulty', AI_DIFFICULTY_NORMAL), '普通')
+            self.log.append(f'玩家{self.current_player}(AI-{difficulty})行动: {message} (评估{plan_score:.1f})')
             return True
 
         self.steps_left = 0

@@ -1,4 +1,4 @@
-from constants import COLORS
+from ..config.constants import COLORS
 
 
 def draw_text_with_shadow(screen, font, text, pos, color, center=False):

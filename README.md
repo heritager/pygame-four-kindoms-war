@@ -4,7 +4,7 @@
 
 ## 游戏略图
 
-![游戏略图](example.png)
+![游戏略图](assets/example.png)
 
 ## 游戏简介
 
@@ -180,6 +180,8 @@
 
 - **鼠标左键**：点击选择士兵，点击目标位置移动
 - **结束回合按钮**：主动结束当前回合
+- **Tab键**：在当前玩家可行动单位间循环切换
+- **Space键**：快速结束当前回合
 - **R键**：重新开始游戏
 - **主菜单**：按键 1/2 选模式，按键 1/2/3 选地图关卡
 - **ESC键**：退出游戏
@@ -188,13 +190,22 @@
 
 - **鼠标左键**：点击选择士兵，点击目标位置移动
 - **结束回合按钮**：主动结束当前回合
+- **Tab键**：在当前玩家可行动单位间循环切换
+- **Space键**：快速结束当前回合
+- **F1/F2/F3**：切换 AI 难度（简单 / 普通 / 困难）
 - **AI自动行动**：AI回合时自动执行移动
 - **主菜单**：按键 1/2 选模式，按键 1/2/3 选地图关卡
 - **ESC键**：退出游戏
 
 ## AI系统
 
-单人模式中的AI采用智能评分系统，综合考虑以下因素：
+单人模式支持三档 AI 难度：
+
+1. **简单**：高随机性，从高分动作池中加权随机选择
+2. **普通**：启发式评分 + Beam Search（默认）
+3. **困难**：2层 Minimax + Alpha-Beta 剪枝（己方动作 + 敌方反制）
+
+其中，普通/困难模式都基于同一套战术评分体系，综合考虑以下因素：
 
 ### 评分因素
 
@@ -231,6 +242,7 @@
 - 平衡进攻与防御
 - 有一定的思考延迟，模拟真实玩家
 - 根据局势动态调整策略
+- 困难模式会额外评估“敌方最佳反制”后再落子
 
 ## 安装说明
 
@@ -281,6 +293,8 @@
 ### 游戏机制
 - 智能AI对手
 - 领土包围系统
+- 包围领土计算采用 dirty flag 缓存，减少无变化回合的重复计算
+- 渲染采用地形层/棋盘层缓存，地图静态元素仅在脏更新时重建
 - 城市生产机制
 - 多样化地形规则
 - 回合制行动点系统
@@ -298,23 +312,37 @@
 
 ```
 .
-├── game_main.py         # 统一主入口 + 游戏核心逻辑
-├── single_mode_main.py  # 单人模式入口
-├── app_controller.py    # 应用循环与模式菜单
-├── ai_logic.py          # AI决策逻辑
-├── map_presets.py       # 地图关卡预设
-├── map_generation.py    # 地形/城市/金矿生成
-├── render_mixin.py      # 渲染与HUD
-├── constants.py         # 常量与颜色配置
-├── Game.py              # 兼容旧入口（转发到 game_main.py）
-├── Single_Game.py       # 兼容旧入口（转发到 single_mode_main.py）
-├── README.md            # 项目文档
-└── requirements.txt     # 依赖库列表
+├── four_kingdoms/
+│   ├── core/
+│   │   ├── game_core.py      # Game 核心逻辑
+│   │   ├── game_main.py      # 统一入口（仅负责启动）
+│   │   ├── ai_logic.py       # AI 决策系统
+│   │   ├── map_generation.py # 地图生成与平衡
+│   │   └── render_mixin.py   # 兼容层（转发到 Renderer）
+│   ├── ui/
+│   │   ├── app_controller.py # 事件循环与菜单
+│   │   ├── renderer.py       # Renderer 渲染器
+│   │   └── ui_text.py        # 文字绘制工具
+│   ├── config/
+│   │   ├── constants.py      # 常量与配置
+│   │   └── map_presets.py    # 地图关卡预设
+│   └── entry/
+│       ├── launcher.py         # 运行入口封装
+│       └── single_mode_main.py # 单人模式入口实现
+├── assets/
+│   └── example.png           # README 示例图片
+├── game_main.py              # 统一主入口（兼容转发）
+├── single_mode_main.py       # 单人模式入口（兼容转发）
+├── Game.py                   # 兼容旧入口（转发到 game_main.py）
+├── Single_Game.py            # 兼容旧入口（转发到 single_mode_main.py）
+├── README.md                 # 项目文档
+└── requirements.txt          # 依赖库列表
 ```
 
 ### 核心类
 
 - `Game`: 游戏主类，整合地图生成、AI与渲染逻辑
+- `Renderer`: 独立渲染器，负责绘制与动画效果
 - `App`: 应用控制器，负责事件循环与模式选择
 - `AIMixin`: AI决策与行动规划
 

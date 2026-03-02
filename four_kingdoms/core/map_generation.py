@@ -3,7 +3,7 @@ import random
 
 import numpy as np
 
-from constants import (
+from ..config.constants import (
     BOARD_SIZE,
     CITY_MAJOR,
     CITY_SMALL,

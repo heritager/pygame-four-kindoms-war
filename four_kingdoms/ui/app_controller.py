@@ -1,6 +1,11 @@
 import pygame
 
-from constants import (
+from ..config.constants import (
+    AI_DIFFICULTY_DEFAULT,
+    AI_DIFFICULTY_EASY,
+    AI_DIFFICULTY_HARD,
+    AI_DIFFICULTY_LABELS,
+    AI_DIFFICULTY_NORMAL,
     BOARD_PIXEL_SIZE,
     CHINESE_FONT_LARGE,
     CHINESE_FONT_SMALL,
@@ -14,8 +19,8 @@ from constants import (
     TILE_SIZE,
     WIDTH,
 )
-from map_presets import DEFAULT_MAP_PRESET, MAP_PRESET_ORDER, MAP_PRESETS
-from ui_text import draw_text_with_shadow as draw_text_with_shadow_shared
+from ..config.map_presets import DEFAULT_MAP_PRESET, MAP_PRESET_ORDER, MAP_PRESETS
+from .ui_text import draw_text_with_shadow as draw_text_with_shadow_shared
 
 
 class App:
@@ -29,6 +34,7 @@ class App:
         self.game = None
         self.running = True
         self.pending_mode = None
+        self.ai_difficulty = AI_DIFFICULTY_DEFAULT
         self.mode_button_hotseat = pygame.Rect(WIDTH // 2 - 180, HEIGHT // 2 - 30, 360, 58)
         self.mode_button_ai = pygame.Rect(WIDTH // 2 - 180, HEIGHT // 2 + 46, 360, 58)
         self.map_buttons = [
@@ -37,8 +43,12 @@ class App:
         ]
         self.map_back_button = pygame.Rect(WIDTH // 2 - 180, HEIGHT // 2 + 200, 360, 42)
 
-    def start_game(self, mode, map_preset_id=DEFAULT_MAP_PRESET):
-        self.game = self.game_class(mode, map_preset_id=map_preset_id)
+    def start_game(self, mode, map_preset_id=DEFAULT_MAP_PRESET, ai_difficulty=None):
+        if ai_difficulty is None:
+            ai_difficulty = self.ai_difficulty
+        if ai_difficulty in AI_DIFFICULTY_LABELS:
+            self.ai_difficulty = ai_difficulty
+        self.game = self.game_class(mode, map_preset_id=map_preset_id, ai_difficulty=self.ai_difficulty)
         self.pending_mode = None
 
     def draw_text_with_shadow(self, font, text, pos, color, center=False):
@@ -74,6 +84,13 @@ class App:
 
         self.draw_mode_button(self.mode_button_hotseat, '1. 4人本地对战', '4个玩家轮流手动操作', hover_hotseat)
         self.draw_mode_button(self.mode_button_ai, '2. 1人对战3个AI', '玩家1手动操作，玩家2/3/4由AI控制', hover_ai)
+        self.draw_text_with_shadow(
+            CHINESE_FONT_TINY,
+            f'AI难度: {AI_DIFFICULTY_LABELS[self.ai_difficulty]} (F1/F2/F3切换)',
+            (WIDTH // 2, self.mode_button_ai.bottom + 20),
+            (176, 188, 206),
+            center=True,
+        )
 
         intro_box = pygame.Rect(panel.x + 40, panel.bottom - 132, panel.width - 80, 84)
         pygame.draw.rect(self.screen, (30, 36, 44), intro_box, border_radius=10)
@@ -104,7 +121,12 @@ class App:
         mode_name = MODE_LABELS.get(self.pending_mode, self.pending_mode)
         self.draw_text_with_shadow(CHINESE_FONT_LARGE, '选择地图关卡', (WIDTH // 2, panel.y + 40), (236, 240, 248), center=True)
         self.draw_text_with_shadow(CHINESE_FONT_TINY, f'当前模式: {mode_name}', (WIDTH // 2, panel.y + 74), (176, 188, 206), center=True)
-        self.draw_text_with_shadow(CHINESE_FONT_TINY, '按键 1/2/3 选择关卡，Backspace 返回模式选择', (WIDTH // 2, panel.y + 96), (176, 188, 206), center=True)
+        help_text = '按键 1/2/3 选择关卡，Backspace 返回模式选择'
+        if self.pending_mode == MODE_SINGLE_AI:
+            help_text = (
+                f'按键 1/2/3 选择关卡，F1/F2/F3调难度({AI_DIFFICULTY_LABELS[self.ai_difficulty]})，Backspace 返回模式'
+            )
+        self.draw_text_with_shadow(CHINESE_FONT_TINY, help_text, (WIDTH // 2, panel.y + 96), (176, 188, 206), center=True)
 
         for idx, map_id in enumerate(MAP_PRESET_ORDER):
             preset = MAP_PRESETS[map_id]
@@ -153,6 +175,29 @@ class App:
             game.selected_pos = None
             game.possible_moves = []
 
+    def cycle_selected_unit(self):
+        game = self.game
+        if game is None or not game.is_human_turn() or game.renderer.show_help:
+            return
+
+        movable_units = []
+        for pos in game.get_player_soldiers(game.current_player):
+            if game.get_possible_moves_for(pos):
+                movable_units.append(pos)
+
+        if not movable_units:
+            return
+
+        movable_units.sort()
+        if game.selected_pos in movable_units:
+            current_idx = movable_units.index(game.selected_pos)
+            next_pos = movable_units[(current_idx + 1) % len(movable_units)]
+        else:
+            next_pos = movable_units[0]
+
+        game.selected_pos = next_pos
+        game.calculate_possible_moves(next_pos)
+
     def run(self):
         while self.running:
             if self.game is None:
@@ -169,6 +214,12 @@ class App:
                                 self.pending_mode = MODE_HOTSEAT
                             elif event.key in (pygame.K_2, pygame.K_KP2):
                                 self.pending_mode = MODE_SINGLE_AI
+                            elif event.key == pygame.K_F1:
+                                self.ai_difficulty = AI_DIFFICULTY_EASY
+                            elif event.key == pygame.K_F2:
+                                self.ai_difficulty = AI_DIFFICULTY_NORMAL
+                            elif event.key == pygame.K_F3:
+                                self.ai_difficulty = AI_DIFFICULTY_HARD
                             elif event.key == pygame.K_ESCAPE:
                                 self.running = False
                         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -191,11 +242,17 @@ class App:
                             self.running = False
                         elif event.type == pygame.KEYDOWN:
                             if event.key in (pygame.K_1, pygame.K_KP1):
-                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[0])
+                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[0], self.ai_difficulty)
                             elif event.key in (pygame.K_2, pygame.K_KP2) and len(MAP_PRESET_ORDER) >= 2:
-                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[1])
+                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[1], self.ai_difficulty)
                             elif event.key in (pygame.K_3, pygame.K_KP3) and len(MAP_PRESET_ORDER) >= 3:
-                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[2])
+                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[2], self.ai_difficulty)
+                            elif event.key == pygame.K_F1:
+                                self.ai_difficulty = AI_DIFFICULTY_EASY
+                            elif event.key == pygame.K_F2:
+                                self.ai_difficulty = AI_DIFFICULTY_NORMAL
+                            elif event.key == pygame.K_F3:
+                                self.ai_difficulty = AI_DIFFICULTY_HARD
                             elif event.key in (pygame.K_BACKSPACE, pygame.K_m):
                                 self.pending_mode = None
                             elif event.key == pygame.K_ESCAPE:
@@ -205,7 +262,7 @@ class App:
                                 self.pending_mode = None
                                 continue
                             if hover_map_idx is not None:
-                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[hover_map_idx])
+                                self.start_game(self.pending_mode, MAP_PRESET_ORDER[hover_map_idx], self.ai_difficulty)
 
                     if self.game is not None:
                         continue
@@ -215,13 +272,14 @@ class App:
                 continue
 
             game = self.game
+            renderer = game.renderer
             mouse_pos = pygame.mouse.get_pos()
             human_turn = game.is_human_turn()
-            game.button_hovered = human_turn and game.end_turn_button.collidepoint(mouse_pos)
-            if (not game.show_help) and (mouse_pos[0] < BOARD_PIXEL_SIZE and mouse_pos[1] < BOARD_PIXEL_SIZE):
-                game.hover_pos = (mouse_pos[1] // TILE_SIZE, mouse_pos[0] // TILE_SIZE)
+            renderer.button_hovered = human_turn and renderer.end_turn_button.collidepoint(mouse_pos)
+            if (not renderer.show_help) and (mouse_pos[0] < BOARD_PIXEL_SIZE and mouse_pos[1] < BOARD_PIXEL_SIZE):
+                renderer.hover_pos = (mouse_pos[1] // TILE_SIZE, mouse_pos[0] // TILE_SIZE)
             else:
-                game.hover_pos = None
+                renderer.hover_pos = None
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -232,14 +290,36 @@ class App:
                         self.game = self.game_class(
                             game.game_mode,
                             map_preset_id=getattr(game, 'map_preset_id', DEFAULT_MAP_PRESET),
+                            ai_difficulty=getattr(game, 'ai_difficulty', self.ai_difficulty),
                         )
                         game = self.game
+                        renderer = game.renderer
+                    elif event.key == pygame.K_TAB:
+                        self.cycle_selected_unit()
+                    elif event.key == pygame.K_SPACE:
+                        if (not game.game_over) and game.is_human_turn() and (not renderer.show_help):
+                            renderer.button_press_until_ms = pygame.time.get_ticks() + 120
+                            game.steps_left = 0
+                            game.log.append(f'玩家{game.current_player}主动结束回合')
+                            game.next_player()
+                    elif event.key == pygame.K_F1:
+                        self.ai_difficulty = AI_DIFFICULTY_EASY
+                        if game.game_mode == MODE_SINGLE_AI:
+                            game.set_ai_difficulty(AI_DIFFICULTY_EASY)
+                    elif event.key == pygame.K_F2:
+                        self.ai_difficulty = AI_DIFFICULTY_NORMAL
+                        if game.game_mode == MODE_SINGLE_AI:
+                            game.set_ai_difficulty(AI_DIFFICULTY_NORMAL)
+                    elif event.key == pygame.K_F3:
+                        self.ai_difficulty = AI_DIFFICULTY_HARD
+                        if game.game_mode == MODE_SINGLE_AI:
+                            game.set_ai_difficulty(AI_DIFFICULTY_HARD)
                     elif event.key in (pygame.K_m, pygame.K_BACKSPACE):
                         self.pending_mode = None
                         self.game = None
                         break
                     elif event.key == pygame.K_h:
-                        game.show_help = not game.show_help
+                        renderer.show_help = not renderer.show_help
                     elif event.key == pygame.K_ESCAPE:
                         self.running = False
 
@@ -260,24 +340,24 @@ class App:
                     elif event.button == 1:
                         x, y = event.pos
 
-                        if game.show_help and game.help_close_button.collidepoint(x, y):
-                            game.show_help = False
+                        if renderer.show_help and renderer.help_close_button.collidepoint(x, y):
+                            renderer.show_help = False
                             continue
 
-                        if (not game.show_help) and game.help_button.collidepoint(x, y):
-                            game.help_button_press_until_ms = pygame.time.get_ticks() + 120
-                            game.show_help = True
+                        if (not renderer.show_help) and renderer.help_button.collidepoint(x, y):
+                            renderer.help_button_press_until_ms = pygame.time.get_ticks() + 120
+                            renderer.show_help = True
                             continue
-                        if (not game.show_help) and game.mode_menu_button.collidepoint(x, y):
+                        if (not renderer.show_help) and renderer.mode_menu_button.collidepoint(x, y):
                             self.pending_mode = None
                             self.game = None
                             break
 
-                        if not game.game_over and not game.show_help:
+                        if not game.game_over and not renderer.show_help:
                             human_turn = game.is_human_turn()
 
-                            if game.end_turn_button.collidepoint(x, y) and human_turn:
-                                game.button_press_until_ms = pygame.time.get_ticks() + 120
+                            if renderer.end_turn_button.collidepoint(x, y) and human_turn:
+                                renderer.button_press_until_ms = pygame.time.get_ticks() + 120
                                 game.steps_left = 0
                                 game.log.append(f'玩家{game.current_player}主动结束回合')
                                 game.next_player()
@@ -300,7 +380,7 @@ class App:
             game.draw(self.screen)
 
             # 绘制选中的棋子
-            if game.selected_pos and not game.show_help:
+            if game.selected_pos and not game.renderer.show_help:
                 x, y = game.selected_pos
                 pygame.draw.rect(self.screen, COLORS['SELECTED'], (y * TILE_SIZE, x * TILE_SIZE, TILE_SIZE, TILE_SIZE), 3)
 

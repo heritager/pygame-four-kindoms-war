@@ -2,7 +2,8 @@ import math
 
 import pygame
 
-from constants import (
+from ..config.constants import (
+    AI_DIFFICULTY_LABELS,
     BOARD_PIXEL_SIZE,
     BOARD_SIZE,
     CHINESE_FONT_MEDIUM,
@@ -24,10 +25,50 @@ from constants import (
     TILE_SIZE,
     WIDTH,
 )
-from ui_text import draw_text_with_shadow as draw_text_with_shadow_shared
+from .ui_text import draw_text_with_shadow as draw_text_with_shadow_shared
 
 
-class RenderMixin:
+class Renderer:
+    def __init__(self):
+        self._game = None
+        self.move_animations = []
+        self.combat_effects = []
+        self.reset_ui_state()
+        self.reset_board_cache()
+
+    def bind_game(self, game):
+        self._game = game
+
+    def reset_effects(self):
+        self.move_animations.clear()
+        self.combat_effects.clear()
+
+    def reset_board_cache(self):
+        self._terrain_surface = None
+        self._board_overlay_surface = None
+        self._water_tiles = []
+        self._board_dirty = True
+
+    def mark_board_dirty(self):
+        self._board_dirty = True
+
+    def reset_ui_state(self):
+        self.show_help = False
+        self.hover_pos = None
+        self.button_hovered = False
+        self.button_press_until_ms = 0
+        self.help_button_press_until_ms = 0
+        self.end_turn_button = pygame.Rect(0, 0, 0, 0)
+        self.help_button = pygame.Rect(0, 0, 0, 0)
+        self.mode_menu_button = pygame.Rect(0, 0, 0, 0)
+        self.help_close_button = pygame.Rect(0, 0, 0, 0)
+
+    def __getattr__(self, attr):
+        game = object.__getattribute__(self, '_game')
+        if game is None:
+            raise AttributeError(attr)
+        return getattr(game, attr)
+
     def draw_text_with_shadow(self, screen, font, text, pos, color, center=False):
         draw_text_with_shadow_shared(screen, font, text, pos, color, center=center)
 
@@ -213,11 +254,10 @@ class RenderMixin:
 
         self.combat_effects = remaining
 
-    def draw(self, screen):
-        now = pygame.time.get_ticks()
-        screen.fill(COLORS['BACKGROUND'])
+    def _rebuild_terrain_surface(self):
+        self._terrain_surface = pygame.Surface((BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE))
+        self._water_tiles = []
 
-        # 绘制地形底图（低饱和背景 + 简单纹理）
         for i in range(BOARD_SIZE):
             for j in range(BOARD_SIZE):
                 tile_x = j * TILE_SIZE
@@ -232,8 +272,9 @@ class RenderMixin:
                     color = COLORS['MOUNTAIN']
                 else:
                     color = COLORS['WATER']
+                    self._water_tiles.append((i, j))
 
-                pygame.draw.rect(screen, color, (tile_x, tile_y, TILE_SIZE, TILE_SIZE))
+                pygame.draw.rect(self._terrain_surface, color, (tile_x, tile_y, TILE_SIZE, TILE_SIZE))
 
                 if terrain_type == TERRAIN_FOREST:
                     trunk_color = (88, 78, 66)
@@ -243,32 +284,112 @@ class RenderMixin:
                         radius = 4 + ((i + j + seed) % 3)
                         cx = tile_x + TILE_SIZE // 2 + ox
                         cy = tile_y + TILE_SIZE // 2 + oy
-                        pygame.draw.circle(screen, (88, 128, 86), (cx, cy), radius)
-                        pygame.draw.rect(screen, trunk_color, (cx - 1, cy + 2, 2, 4))
+                        pygame.draw.circle(self._terrain_surface, (88, 128, 86), (cx, cy), radius)
+                        pygame.draw.rect(self._terrain_surface, trunk_color, (cx - 1, cy + 2, 2, 4))
                 elif terrain_type == TERRAIN_MOUNTAIN:
-                    pygame.draw.polygon(screen, (168, 170, 176), [
+                    pygame.draw.polygon(self._terrain_surface, (168, 170, 176), [
                         (tile_x + 4, tile_y + TILE_SIZE - 3),
                         (tile_x + TILE_SIZE // 2 - 4, tile_y + 10),
                         (tile_x + TILE_SIZE - 10, tile_y + TILE_SIZE - 3),
                     ])
-                    pygame.draw.polygon(screen, (148, 150, 158), [
+                    pygame.draw.polygon(self._terrain_surface, (148, 150, 158), [
                         (tile_x + 10, tile_y + TILE_SIZE - 4),
                         (tile_x + TILE_SIZE // 2 + 2, tile_y + 6),
                         (tile_x + TILE_SIZE - 4, tile_y + TILE_SIZE - 4),
                     ])
-                    pygame.draw.polygon(screen, (210, 212, 218), [
+                    pygame.draw.polygon(self._terrain_surface, (210, 212, 218), [
                         (tile_x + TILE_SIZE // 2 - 2, tile_y + 11),
                         (tile_x + TILE_SIZE // 2 + 3, tile_y + 17),
                         (tile_x + TILE_SIZE // 2 - 7, tile_y + 18),
                     ])
-                elif terrain_type == TERRAIN_WATER:
-                    wave_shift = (now // 180 + i + j) % 8
-                    for k in range(2):
-                        y = tile_y + 11 + k * 12 + (wave_shift % 3)
-                        pygame.draw.arc(screen, (132, 168, 194), (tile_x + 4, y, TILE_SIZE - 8, 10), 0, math.pi, 1)
 
-        # 领土改为边线显示，保留地形中心纹理
-        self.draw_territory_borders(screen)
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                pygame.draw.rect(self._terrain_surface, COLORS['GRID'], (j * TILE_SIZE, i * TILE_SIZE, TILE_SIZE, TILE_SIZE), 1)
+
+    def _draw_water_waves(self, screen, now):
+        for i, j in self._water_tiles:
+            tile_x = j * TILE_SIZE
+            tile_y = i * TILE_SIZE
+            wave_shift = (now // 180 + i + j) % 8
+            for k in range(2):
+                y = tile_y + 11 + k * 12 + (wave_shift % 3)
+                pygame.draw.arc(screen, (132, 168, 194), (tile_x + 4, y, TILE_SIZE - 8, 10), 0, math.pi, 1)
+
+    def _draw_cities(self, surface):
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                _, _, city_type, _ = self.board[i, j]
+                if city_type <= 0:
+                    continue
+
+                x = j * TILE_SIZE
+                y = i * TILE_SIZE
+                shadow = (x + 1, y + 2)
+                if city_type == CITY_CAPITAL:
+                    pygame.draw.rect(surface, (68, 58, 58), (shadow[0] + TILE_SIZE // 4, shadow[1] + TILE_SIZE // 4, TILE_SIZE // 2, TILE_SIZE // 2))
+                    pygame.draw.rect(surface, COLORS['CAPITAL'], (x + TILE_SIZE // 4, y + TILE_SIZE // 4, TILE_SIZE // 2, TILE_SIZE // 2))
+                    pygame.draw.polygon(surface, (230, 190, 70), [
+                        (x + TILE_SIZE // 4, y + TILE_SIZE // 4),
+                        (x + TILE_SIZE * 3 // 4, y + TILE_SIZE // 4),
+                        (x + TILE_SIZE // 2, y + 2),
+                    ])
+                elif city_type == CITY_MAJOR:
+                    pygame.draw.rect(surface, (78, 68, 52), (shadow[0] + TILE_SIZE // 4, shadow[1] + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 2))
+                    pygame.draw.rect(surface, COLORS['MAJOR_CITY'], (x + TILE_SIZE // 4, y + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 2))
+                    pygame.draw.polygon(surface, (170, 132, 92), [
+                        (x + TILE_SIZE // 4, y + TILE_SIZE // 2),
+                        (x + TILE_SIZE * 3 // 4, y + TILE_SIZE // 2),
+                        (x + TILE_SIZE // 2, y + TILE_SIZE // 3),
+                    ])
+                else:
+                    pygame.draw.rect(surface, (76, 70, 62), (shadow[0] + TILE_SIZE // 3, shadow[1] + TILE_SIZE // 2, TILE_SIZE // 3, TILE_SIZE // 2))
+                    pygame.draw.rect(surface, COLORS['CITY'], (x + TILE_SIZE // 3, y + TILE_SIZE // 2, TILE_SIZE // 3, TILE_SIZE // 2))
+                    pygame.draw.rect(surface, (156, 140, 124), (x + TILE_SIZE // 4, y + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 8))
+
+    def _draw_gold_mines(self, surface):
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.resource_map[i, j] != RESOURCE_GOLD_MINE:
+                    continue
+
+                x = j * TILE_SIZE
+                y = i * TILE_SIZE
+                icon_x = x + TILE_SIZE // 2 - 8
+                icon_y = y + TILE_SIZE // 2 - 8
+                glow = pygame.Surface((18, 18), pygame.SRCALPHA)
+                glow.fill((255, 220, 80, 56))
+                surface.blit(glow, (icon_x - 1, icon_y - 1))
+                self.draw_hud_legend_icon(surface, 'gold_mine', icon_x, icon_y, size=16)
+
+                mine_owner = self.board[i, j, 0]
+                if mine_owner > 0:
+                    pygame.draw.rect(
+                        surface,
+                        COLORS[mine_owner],
+                        (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8),
+                        1,
+                        border_radius=4,
+                    )
+
+    def _rebuild_board_overlay_surface(self):
+        self._board_overlay_surface = pygame.Surface((BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE), pygame.SRCALPHA)
+        self.draw_territory_borders(self._board_overlay_surface)
+        self._draw_cities(self._board_overlay_surface)
+        self._draw_gold_mines(self._board_overlay_surface)
+        self._board_dirty = False
+
+    def draw(self, game, screen):
+        self.bind_game(game)
+        now = pygame.time.get_ticks()
+        screen.fill(COLORS['BACKGROUND'])
+        if self._terrain_surface is None:
+            self._rebuild_terrain_surface()
+        screen.blit(self._terrain_surface, (0, 0))
+        self._draw_water_waves(screen, now)
+        if self._board_overlay_surface is None or self._board_dirty:
+            self._rebuild_board_overlay_surface()
+        screen.blit(self._board_overlay_surface, (0, 0))
 
         # 鼠标悬停高亮
         if self.hover_pos and not self.show_help:
@@ -283,67 +404,6 @@ class RenderMixin:
         for pos in self.possible_moves:
             x, y = pos
             pygame.draw.rect(screen, COLORS['MOVE_RANGE'], (y * TILE_SIZE, x * TILE_SIZE, TILE_SIZE, TILE_SIZE), 2)
-
-        # 网格线
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                pygame.draw.rect(screen, COLORS['GRID'], (j * TILE_SIZE, i * TILE_SIZE, TILE_SIZE, TILE_SIZE), 1)
-
-        # 城市
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                _, _, city_type, _ = self.board[i, j]
-                if city_type <= 0:
-                    continue
-
-                x = j * TILE_SIZE
-                y = i * TILE_SIZE
-                shadow = (x + 1, y + 2)
-                if city_type == CITY_CAPITAL:
-                    pygame.draw.rect(screen, (68, 58, 58), (shadow[0] + TILE_SIZE // 4, shadow[1] + TILE_SIZE // 4, TILE_SIZE // 2, TILE_SIZE // 2))
-                    pygame.draw.rect(screen, COLORS['CAPITAL'], (x + TILE_SIZE // 4, y + TILE_SIZE // 4, TILE_SIZE // 2, TILE_SIZE // 2))
-                    pygame.draw.polygon(screen, (230, 190, 70), [
-                        (x + TILE_SIZE // 4, y + TILE_SIZE // 4),
-                        (x + TILE_SIZE * 3 // 4, y + TILE_SIZE // 4),
-                        (x + TILE_SIZE // 2, y + 2),
-                    ])
-                elif city_type == CITY_MAJOR:
-                    pygame.draw.rect(screen, (78, 68, 52), (shadow[0] + TILE_SIZE // 4, shadow[1] + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 2))
-                    pygame.draw.rect(screen, COLORS['MAJOR_CITY'], (x + TILE_SIZE // 4, y + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 2))
-                    pygame.draw.polygon(screen, (170, 132, 92), [
-                        (x + TILE_SIZE // 4, y + TILE_SIZE // 2),
-                        (x + TILE_SIZE * 3 // 4, y + TILE_SIZE // 2),
-                        (x + TILE_SIZE // 2, y + TILE_SIZE // 3),
-                    ])
-                else:
-                    pygame.draw.rect(screen, (76, 70, 62), (shadow[0] + TILE_SIZE // 3, shadow[1] + TILE_SIZE // 2, TILE_SIZE // 3, TILE_SIZE // 2))
-                    pygame.draw.rect(screen, COLORS['CITY'], (x + TILE_SIZE // 3, y + TILE_SIZE // 2, TILE_SIZE // 3, TILE_SIZE // 2))
-                    pygame.draw.rect(screen, (156, 140, 124), (x + TILE_SIZE // 4, y + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 8))
-
-        # 金矿标记
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                if self.resource_map[i, j] != RESOURCE_GOLD_MINE:
-                    continue
-
-                x = j * TILE_SIZE
-                y = i * TILE_SIZE
-                icon_x = x + TILE_SIZE // 2 - 8
-                icon_y = y + TILE_SIZE // 2 - 8
-                glow = pygame.Surface((18, 18), pygame.SRCALPHA)
-                glow.fill((255, 220, 80, 56))
-                screen.blit(glow, (icon_x - 1, icon_y - 1))
-                self.draw_hud_legend_icon(screen, 'gold_mine', icon_x, icon_y, size=16)
-
-                mine_owner = self.board[i, j, 0]
-                if mine_owner > 0:
-                    pygame.draw.rect(
-                        screen,
-                        COLORS[mine_owner],
-                        (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8),
-                        1,
-                        border_radius=4,
-                    )
 
         # 单位移动动画
         active_animations = self.collect_active_move_animations(now)
@@ -424,13 +484,16 @@ class RenderMixin:
             self.draw_text_with_shadow(screen, CHINESE_FONT_SMALL, f'行动点: {self.steps_left}', (status_box.x + 12, status_box.y + 66), (214, 220, 230))
             self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, f'模式: {MODE_LABELS.get(self.game_mode, self.game_mode)}', (status_box.x + 12, status_box.y + 88), (180, 190, 206))
             self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, f'关卡: {getattr(self, "map_name", "默认")}', (status_box.x + 12, status_box.y + 106), (180, 190, 206))
+            if self.game_mode == MODE_SINGLE_AI:
+                difficulty = AI_DIFFICULTY_LABELS.get(getattr(self, 'ai_difficulty', ''), '普通')
+                self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, f'AI: {difficulty}', (status_box.x + 12, status_box.y + 124), (180, 190, 206))
         elif self.winner:
             self.draw_text_with_shadow(screen, CHINESE_FONT_MEDIUM, f'胜利者: 玩家{self.winner}', (status_box.x + 12, status_box.y + 10), COLORS[self.winner])
         else:
             self.draw_text_with_shadow(screen, CHINESE_FONT_MEDIUM, '游戏结束: 平局', (status_box.x + 12, status_box.y + 10), (228, 228, 228))
 
         territory_x = status_box.x + 12
-        territory_y = status_box.y + 128
+        territory_y = status_box.y + 144 if self.game_mode == MODE_SINGLE_AI else status_box.y + 128
         for player in [1, 2, 3, 4]:
             active = player in self.players
             block_color = COLORS[player] if active else (100, 104, 110)
@@ -535,12 +598,14 @@ class RenderMixin:
         self.draw_text_with_shadow(
             screen,
             CHINESE_FONT_TINY,
-            'H:帮助  R:重开  M/Backspace:模式',
+            'H:帮助  R:重开  Tab:切换单位  Space:结束回合',
             (ops_box.x + 14, ops_box.y + 178),
             (184, 192, 208),
         )
 
         tips = '左键选择 右键取消 滚轮日志 ESC退出'
+        if self.game_mode == MODE_SINGLE_AI:
+            tips = 'F1/F2/F3切换AI难度  M/Backspace返回模式'
         self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, tips, (ops_box.x + 14, ops_box.y + 194), (188, 194, 204))
 
         # 帮助弹窗

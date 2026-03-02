@@ -2,7 +2,7 @@ import sys
 
 import pygame
 
-from app_controller import App
+from ..ui.app_controller import App
 
 
 def run_app(game_class, initial_mode=None):
