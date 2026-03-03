@@ -16,6 +16,63 @@ from ..config.constants import (
 )
 
 
+# ========== AI 评分常量 ==========
+# 基础收益
+SCORE_MOVE_TO_NEUTRAL = 34  # 移动到无主位置的基础收益
+SCORE_ATTACK_WIN_BASE = 98  # 攻击获胜基础分
+SCORE_ATTACK_WIN_PER_HP = 2  # 攻击获胜每点敌方血量加分（上限 44）
+SCORE_ATTACK_WIN_MAX_HP_BONUS = 44
+SCORE_ATTACK_LOSS = -52  # 攻击失败扣分
+SCORE_ATTACK_DRAW = 24  # 同归于尽加分
+
+# 金矿价值（金矿每轮产 5 血，是重要战略资源，优先级高于普通城市）
+SCORE_ENEMY_MINE = 180  # 夺取敌方金矿（+48）
+SCORE_NEUTRAL_MINE = 140  # 占领中立金矿（+48）
+SCORE_OWN_EMPTY_MINE = 100  # 己方空矿补驻军（+28）
+SCORE_MINE_GAIN_PER_HP = 55  # 每点产兵增量价值（+13）
+SCORE_MINE_FULL_BONUS = 40  # 满产额外加分（+12）
+
+# 城市/首都价值
+SCORE_CAPTURE_CAPITAL = 520  # 占领首都
+SCORE_CAPTURE_MAJOR_CITY = 148  # 占领大城市
+SCORE_CAPTURE_SMALL_CITY = 98  # 占领小城市
+
+# 距离价值
+SCORE_APPROACH_ENEMY_CAPITAL_PER_STEP = 8  # 接近敌方首都每格加分
+SCORE_AWAY_FROM_ENEMY_CAPITAL = -3  # 远离敌方首都扣分
+SCORE_APPROACH_STRATEGIC_PER_STEP = 7  # 接近战略目标每格加分
+SCORE_AWAY_FROM_STRATEGIC = -4  # 远离战略目标扣分
+
+# 连击潜力
+SCORE_CHAIN_BASE = 36  # 连击基础分
+SCORE_CHAIN_PER_TARGET = 24  # 每个额外目标加分
+SCORE_CHAIN_MAX = 96  # 连击加分上限
+
+# 首都保护
+SCORE_LEAVE_CAPITAL_PENALTY = -70  # 离开首都驻军扣分
+SCORE_DEFEND_CAPITAL_APPROACH = 16  # 回防首都加分
+SCORE_DEFEND_CAPITAL_AWAY = -10  # 远离受威胁首都扣分
+
+# 威胁评估风险系数
+RISK_FACTOR_ENEMY_CAPITAL = 0.18  # 敌方首都风险系数
+RISK_FACTOR_ENEMY_CITY_OR_MINE = 0.42  # 敌方城市/金矿风险系数
+RISK_FACTOR_NEUTRAL_CITY_OR_MINE = 0.62  # 中立城市/金矿风险系数
+RISK_FACTOR_STRATEGIC = 0.7  # 战略目标风险系数
+RISK_FACTOR_DEFAULT = 1.0  # 默认风险系数
+
+# 威胁评估计算
+SCORE_THREAT_BASE = 130  # 威胁基础扣分
+SCORE_THREAT_PER_HP_DIFF = 8  # 每点血量差扣分
+SCORE_THREAT_LOW_PER_DIFF = 4  # 低威胁每点差扣分
+SCORE_THREAT_SURVIVOR_FACTOR = 0.6  # 幸存者血量系数
+
+# 行动点效率
+SCORE_ACTION_POINT_EFFICIENCY = 9  # 每点额外行动点消耗扣分
+
+# 随机噪声
+NOISE_SCALE = 0.2  # 简单/普通难度随机噪声范围
+
+
 class AIMixin:
     def get_player_soldiers_from_state(self, player, board_state, move_count_state):
         soldiers = []
@@ -202,54 +259,54 @@ class AIMixin:
 
         # 扩张/进攻基础收益
         if target_player == 0:
-            score += 34
+            score += SCORE_MOVE_TO_NEUTRAL
         elif target_player != player and target_hp > 0:
             if attacker_survived:
-                score += 98 + min(44, target_hp * 2)
+                score += SCORE_ATTACK_WIN_BASE + min(SCORE_ATTACK_WIN_MAX_HP_BONUS, target_hp * SCORE_ATTACK_WIN_PER_HP)
             elif defender_survived:
-                score -= 52
+                score += SCORE_ATTACK_LOSS
             else:
-                score += 24
+                score += SCORE_ATTACK_DRAW
 
-        # 金矿价值：按“下一轮预期产兵增量”打分，优先高产矿。
+        # 金矿价值：按”下一轮预期产兵增量”打分，优先高产矿。
         if target_has_mine:
             mine_gain = self.estimate_mine_production_gain(simulated['board'], to_pos, player)
             if attacker_survived and mine_gain > 0:
                 if target_is_enemy_mine:
-                    score += 132
+                    score += SCORE_ENEMY_MINE
                 elif target_is_neutral_mine:
-                    score += 92
+                    score += SCORE_NEUTRAL_MINE
                 else:
                     # 己方空矿补驻军同样有价值
-                    score += 72
-                score += mine_gain * 42
+                    score += SCORE_OWN_EMPTY_MINE
+                score += mine_gain * SCORE_MINE_GAIN_PER_HP
                 if mine_gain == 5:
-                    score += 28
+                    score += SCORE_MINE_FULL_BONUS
 
         # 城市/首都价值
         if simulated['captured_capital']:
-            score += 520
+            score += SCORE_CAPTURE_CAPITAL
         elif simulated['captured_city']:
             if target_city_type == CITY_MAJOR:
-                score += 148
+                score += SCORE_CAPTURE_MAJOR_CITY
             elif target_city_type == CITY_SMALL:
-                score += 98
+                score += SCORE_CAPTURE_SMALL_CITY
 
         # 接近敌方首都的长期价值
         before_dist = self.distance_to_nearest_enemy_capital(player, from_pos)
         after_dist = self.distance_to_nearest_enemy_capital(player, to_pos)
         if after_dist < before_dist:
-            score += (before_dist - after_dist) * 8
+            score += (before_dist - after_dist) * SCORE_APPROACH_ENEMY_CAPITAL_PER_STEP
         elif after_dist > before_dist:
-            score -= 3
+            score += SCORE_AWAY_FROM_ENEMY_CAPITAL
 
         # 接近战略目标（城市/首都/金矿）的价值
         before_obj_dist = self.distance_to_nearest_strategic_target(player, from_pos, board_state)
         after_obj_dist = self.distance_to_nearest_strategic_target(player, to_pos, simulated['board'])
         if after_obj_dist < before_obj_dist:
-            score += (before_obj_dist - after_obj_dist) * 7
+            score += (before_obj_dist - after_obj_dist) * SCORE_APPROACH_STRATEGIC_PER_STEP
         elif after_obj_dist > before_obj_dist:
-            score -= 4
+            score += SCORE_AWAY_FROM_STRATEGIC
 
         # 连击潜力：若移动后还能继续威胁战略点，则鼓励推进。
         if attacker_survived and simulated['steps_left'] > 0:
@@ -260,11 +317,11 @@ class AIMixin:
                 simulated['steps_left'],
             )
             if chain_targets > 0:
-                score += min(96, 36 + chain_targets * 24)
+                score += min(SCORE_CHAIN_MAX, SCORE_CHAIN_BASE + chain_targets * SCORE_CHAIN_PER_TARGET)
 
         # 保护己方首都：避免首都驻军轻易外出
         if self.capitals.get(player) == from_pos:
-            score -= 70
+            score += SCORE_LEAVE_CAPITAL_PENALTY
 
         # 若己方首都受威胁，鼓励回防
         own_capital = self.capitals.get(player)
@@ -279,9 +336,34 @@ class AIMixin:
                 before_own_dist = abs(from_pos[0] - own_capital[0]) + abs(from_pos[1] - own_capital[1])
                 after_own_dist = abs(to_pos[0] - own_capital[0]) + abs(to_pos[1] - own_capital[1])
                 if after_own_dist < before_own_dist:
-                    score += 16
+                    score += SCORE_DEFEND_CAPITAL_APPROACH
                 elif after_own_dist > before_own_dist:
-                    score -= 10
+                    score += SCORE_DEFEND_CAPITAL_AWAY
+
+        # 若己方金矿受威胁，鼓励回防（金矿是重要资源）
+        own_mines = []
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.resource_map[i, j] == RESOURCE_GOLD_MINE:
+                    mine_owner = simulated['board'][i, j, 0]
+                    mine_hp = simulated['board'][i, j, 1]
+                    if mine_owner == player and mine_hp > 0:
+                        own_mines.append((i, j))
+
+        for mine_pos in own_mines:
+            mine_threat = self.get_max_enemy_threat_against(
+                player,
+                mine_pos,
+                simulated['board'],
+                self.calculate_steps_per_turn(),
+            )
+            if mine_threat > 0:
+                before_mine_dist = abs(from_pos[0] - mine_pos[0]) + abs(from_pos[1] - mine_pos[1])
+                after_mine_dist = abs(to_pos[0] - mine_pos[0]) + abs(to_pos[1] - mine_pos[1])
+                if after_mine_dist < before_mine_dist:
+                    score += 12  # 回防金矿加分
+                elif after_mine_dist > before_mine_dist:
+                    score -= 8  # 离开金矿减分
 
         # 威胁评估：避免走到下一手可被轻易反杀的位置
         if attacker_survived:
@@ -289,27 +371,27 @@ class AIMixin:
             threat_hp = self.get_max_enemy_threat_against(player, to_pos, simulated['board'], enemy_steps)
             survivor_hp = simulated['survivor_hp']
             if target_is_enemy_capital:
-                risk_factor = 0.18
+                risk_factor = RISK_FACTOR_ENEMY_CAPITAL
             elif target_is_enemy_city or target_is_enemy_mine:
-                risk_factor = 0.42
+                risk_factor = RISK_FACTOR_ENEMY_CITY_OR_MINE
             elif target_is_neutral_city or target_is_neutral_mine:
-                risk_factor = 0.62
+                risk_factor = RISK_FACTOR_NEUTRAL_CITY_OR_MINE
             elif target_is_strategic:
-                risk_factor = 0.7
+                risk_factor = RISK_FACTOR_STRATEGIC
             else:
-                risk_factor = 1.0
+                risk_factor = RISK_FACTOR_DEFAULT
 
             if threat_hp >= survivor_hp and threat_hp > 0:
-                score -= (130 + (threat_hp - survivor_hp) * 8) * risk_factor
+                score -= (SCORE_THREAT_BASE + (threat_hp - survivor_hp) * SCORE_THREAT_PER_HP_DIFF) * risk_factor
             elif threat_hp > 0:
-                score -= max(0, (threat_hp - survivor_hp * 0.6) * 4) * risk_factor
+                score -= max(0, (threat_hp - survivor_hp * SCORE_THREAT_SURVIVOR_FACTOR) * SCORE_THREAT_LOW_PER_DIFF) * risk_factor
 
         # 行动点效率
-        score -= (simulated['terrain_cost'] - 1) * 9
+        score -= (simulated['terrain_cost'] - 1) * SCORE_ACTION_POINT_EFFICIENCY
 
         # 普通/简单难度允许轻微随机打破同分；困难模式会关闭噪声。
         if add_noise:
-            score += random.random() * 0.2
+            score += random.random() * NOISE_SCALE
         return score, simulated
 
     def enumerate_ai_actions(self, player, board_state, move_count_state, steps_left):
@@ -498,8 +580,10 @@ class AIMixin:
         if not ranked:
             return None, None
 
-        top_pool_size = max(2, min(6, len(ranked)))
+        # 从 Top 6 动作中按排名加权随机选择（排名越前权重越高）
+        top_pool_size = min(6, len(ranked))
         pool = ranked[:top_pool_size]
+        # 权重：第 1 名权重最高，依次递减
         weights = [top_pool_size - idx for idx in range(top_pool_size)]
         picked = random.choices(pool, weights=weights, k=1)[0]
         return (picked[1], picked[2]), picked[0]

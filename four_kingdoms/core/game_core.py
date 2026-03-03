@@ -22,6 +22,15 @@ from ..config.constants import (
     TERRAIN_WATER,
 )
 from ..config.map_presets import DEFAULT_MAP_PRESET, get_map_preset
+from ..audio import (
+    SOUND_ATTACK,
+    SOUND_CAPTURE,
+    SOUND_CAPTURE_CAPITAL,
+    SOUND_MOVE,
+    SOUND_VICTORY,
+    play_sound,
+)
+from ..stats import get_statistics_manager
 from .ai_logic import AIMixin
 from .map_generation import MapGenerationMixin
 from ..ui.renderer import Renderer
@@ -42,6 +51,7 @@ class Game(MapGenerationMixin, AIMixin):
         self.renderer = Renderer()
         self.ai_difficulty = AI_DIFFICULTY_DEFAULT
         self.set_ai_difficulty(ai_difficulty, announce=False)
+        self.stats_manager = get_statistics_manager()
         self.reset_game()
         
     def reset_game(self):
@@ -93,6 +103,10 @@ class Game(MapGenerationMixin, AIMixin):
         
         # 游戏状态
         self.players = [1, 2, 3, 4]
+
+        # 初始化统计（需要在 self.players 之后调用）
+        self.stats_manager.start_new_game(self)
+
         if self.game_mode == MODE_HOTSEAT:
             self.human_players = {1, 2, 3, 4}
             self.ai_players = set()
@@ -110,8 +124,9 @@ class Game(MapGenerationMixin, AIMixin):
         self.steps_left = self.steps_per_turn
         self.selected_pos = None
         self.move_history = []
+        self.last_move = None  # 最后一次移动 (from_pos, to_pos)
         self.last_ai_action_ms = 0
-        self.ai_action_delay_ms = 180
+        # ai_action_delay_ms 在 set_ai_difficulty 中设置
         self.renderer.reset_effects()
         self.renderer.reset_ui_state()
         self.renderer.reset_board_cache()
@@ -203,6 +218,14 @@ class Game(MapGenerationMixin, AIMixin):
         if self.ai_difficulty == difficulty:
             return False
         self.ai_difficulty = difficulty
+        # 根据难度设置 AI 思考延迟（毫秒）
+        self.ai_delays = {
+            AI_DIFFICULTY_EASY: 400,    # 400ms 每步
+            AI_DIFFICULTY_NORMAL: 250,  # 250ms 每步
+            AI_DIFFICULTY_HARD: 150,    # 150ms 每步
+        }
+        self.ai_action_delay_ms = self.ai_delays.get(difficulty, 250)
+
         if announce and hasattr(self, 'log'):
             self.log.append(f"AI难度切换为: {AI_DIFFICULTY_LABELS[difficulty]}")
         return True
@@ -504,11 +527,16 @@ class Game(MapGenerationMixin, AIMixin):
             self.game_over = True
             self.winner = self.players[0] if self.players else None
             if self.winner:
-                self.log.append(f"游戏结束! 玩家{self.winner}获胜!")
+                self.log.append(f"游戏结束！玩家{self.winner}获胜!")
+                # 播放胜利音效（如果是人类玩家获胜）
+                if self.winner in self.human_players:
+                    play_sound(SOUND_VICTORY)
             else:
-                self.log.append("游戏结束! 所有玩家均被消灭!")
+                self.log.append("游戏结束！所有玩家均被消灭!")
             self.selected_pos = None
             self.possible_moves = []
+            # 结束统计
+            self.stats_manager.end_game(self)
             return True
         return False
     
@@ -521,6 +549,9 @@ class Game(MapGenerationMixin, AIMixin):
         self.ai_players.discard(player)
         self.human_players.discard(player)
         self.log.append(f"玩家{conqueror}占领了玩家{player}的首都! 玩家{player}被消灭!")
+
+        # 记录占领首都统计
+        self.stats_manager.record_capture(conqueror, CITY_CAPITAL, is_capital=True)
         
         if self.game_mode == MODE_SINGLE_AI and player == self.primary_human:
             self.player_defeated = True
@@ -550,6 +581,7 @@ class Game(MapGenerationMixin, AIMixin):
         player = resolved['source_player']
         target_player = resolved['target_player']
         target_hp = resolved['target_hp']
+        target_city_type = resolved['target_city_type']
         attacker_survived = resolved['attacker_survived']
         defender_survived = resolved['defender_survived']
         survivor_hp = resolved['survivor_hp']
@@ -567,11 +599,28 @@ class Game(MapGenerationMixin, AIMixin):
         else:
             self.log.append(f"玩家{player}移动士兵到({y2},{x2})")
 
-        # 记录移动历史
+        # 播放音效
+        if target_player != 0 and target_hp > 0:
+            if attacker_survived and target_city_type == CITY_CAPITAL:
+                play_sound(SOUND_CAPTURE_CAPITAL)
+            elif attacker_survived:
+                play_sound(SOUND_CAPTURE)
+            else:
+                play_sound(SOUND_ATTACK)
+        else:
+            play_sound(SOUND_MOVE)
+
+        # 记录统计
+        self.stats_manager.record_move(player)
+        if attack_damage_text:
+            self.stats_manager.record_attack(player, attacker_survived)
+
+        # 记录移动历史（只保留最后一次移动用于高亮）
+        self.last_move = (from_pos, to_pos)
         self.move_history.append((from_pos, to_pos))
 
-        # 消耗行动点
-        self.steps_left -= terrain_cost
+        # 消耗行动点（已在上层检查过，此处做保护性处理）
+        self.steps_left = max(0, self.steps_left - terrain_cost)
         self.mark_territories_dirty(board_changed=True)
 
         if attack_damage_text:
@@ -629,7 +678,8 @@ class Game(MapGenerationMixin, AIMixin):
         # 重置选中位置和可移动范围
         self.selected_pos = None
         self.possible_moves = []
-        
+        self.last_move = None  # 清除最后移动高亮
+
         if self.current_player in self.ai_players:
             self.log.append(f"玩家{self.current_player}(AI)的回合开始")
         else:
