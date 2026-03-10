@@ -1,0 +1,43 @@
+"""Audio package for Four Kingdoms War."""
+
+from .sound_manager import (
+    SoundManager,
+    get_sound_manager,
+    play_sound,
+    play_music,
+    stop_music,
+    toggle_mute,
+    SOUND_MOVE,
+    SOUND_ATTACK,
+    SOUND_CAPTURE,
+    SOUND_CAPTURE_CAPITAL,
+    SOUND_BUILD,
+    SOUND_SELECT,
+    SOUND_CLICK,
+    SOUND_VICTORY,
+    SOUND_DEFEAT,
+    MUSIC_MENU,
+    MUSIC_GAME,
+    MUSIC_VICTORY,
+)
+
+__all__ = [
+    'SoundManager',
+    'get_sound_manager',
+    'play_sound',
+    'play_music',
+    'stop_music',
+    'toggle_mute',
+    'SOUND_MOVE',
+    'SOUND_ATTACK',
+    'SOUND_CAPTURE',
+    'SOUND_CAPTURE_CAPITAL',
+    'SOUND_BUILD',
+    'SOUND_SELECT',
+    'SOUND_CLICK',
+    'SOUND_VICTORY',
+    'SOUND_DEFEAT',
+    'MUSIC_MENU',
+    'MUSIC_GAME',
+    'MUSIC_VICTORY',
+]

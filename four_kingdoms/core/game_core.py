@@ -1,4 +1,4 @@
-from collections import deque
+from pathlib import Path
 
 import numpy as np
 
@@ -6,6 +6,7 @@ from ..config.constants import (
     AI_DIFFICULTY_DEFAULT,
     AI_DIFFICULTY_EASY,
     AI_DIFFICULTY_HARD,
+    AI_DIFFICULTY_LEARNED,
     AI_DIFFICULTY_LABELS,
     AI_DIFFICULTY_NORMAL,
     BOARD_SIZE,
@@ -50,6 +51,14 @@ class Game(MapGenerationMixin, AIMixin):
         self.map_name = self.map_preset['name']
         self.renderer = Renderer()
         self.ai_difficulty = AI_DIFFICULTY_DEFAULT
+        self.learned_policy = None
+        models_dir = Path(__file__).resolve().parents[2] / 'models'
+        self.learned_policy_paths = [
+            models_dir / 'mlp_policy.npz',
+            models_dir / 'linear_policy.npz',
+        ]
+        self.learned_policy_path = self.learned_policy_paths[0]
+        self.learned_policy_error = None
         self.set_ai_difficulty(ai_difficulty, announce=False)
         self.stats_manager = get_statistics_manager()
         self.reset_game()
@@ -213,7 +222,7 @@ class Game(MapGenerationMixin, AIMixin):
             self.renderer.mark_board_dirty()
 
     def set_ai_difficulty(self, difficulty, announce=True):
-        if difficulty not in {AI_DIFFICULTY_EASY, AI_DIFFICULTY_NORMAL, AI_DIFFICULTY_HARD}:
+        if difficulty not in {AI_DIFFICULTY_EASY, AI_DIFFICULTY_NORMAL, AI_DIFFICULTY_HARD, AI_DIFFICULTY_LEARNED}:
             return False
         if self.ai_difficulty == difficulty:
             return False
@@ -223,6 +232,7 @@ class Game(MapGenerationMixin, AIMixin):
             AI_DIFFICULTY_EASY: 400,    # 400ms 每步
             AI_DIFFICULTY_NORMAL: 250,  # 250ms 每步
             AI_DIFFICULTY_HARD: 150,    # 150ms 每步
+            AI_DIFFICULTY_LEARNED: 120,  # 轻量模型推理更快
         }
         self.ai_action_delay_ms = self.ai_delays.get(difficulty, 250)
 
@@ -231,88 +241,14 @@ class Game(MapGenerationMixin, AIMixin):
         return True
     
     def calculate_territories(self):
-        """计算包围领土 - 支持占领敌方无士兵领土"""
+        """刷新领土统计。
+
+        领土归属只由实际移动和战斗落点决定，不再根据包围关系自动改色。
+        """
         if not self.territories_dirty:
             return
-
-        visited = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
-        captured_count = {1: 0, 2: 0, 3: 0, 4: 0}
-        
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                is_neutral_city = self.board[i, j, 2] > 0 and self.board[i, j, 0] == 0
-                # 跳过已访问、水域、中立城市（中立城市本身不可归属）
-                if (visited[i, j] or 
-                    self.terrain[i][j] == TERRAIN_WATER or 
-                    is_neutral_city):
-                    continue
-                    
-                region = []
-                queue = deque([(i, j)])
-                region_owner = self.board[i, j, 0]   # 区域当前所有者（0 表示无主）
-                border_owners = set()                 # 相邻的其他玩家
-                border_has_unowned = False            # 相邻是否有无主普通格子
-                has_soldiers = False                   # 区域内是否有士兵
-                
-                while queue:
-                    x, y = queue.popleft()
-                    if visited[x, y]:
-                        continue
-                    
-                    # 确保当前格子所有者与 region_owner 一致（防止 BFS 错误）
-                    if self.board[x, y, 0] != region_owner:
-                        continue
-                    visited[x, y] = True
-                        
-                    region.append((x, y))
-                    
-                    # 检查区域内士兵
-                    if self.board[x, y, 1] > 0:
-                        has_soldiers = True
-                    
-                    # 四方向探索
-                    for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                        nx, ny = x + dx, y + dy
-                        
-                        # 边界视为封闭
-                        if nx < 0 or nx >= BOARD_SIZE or ny < 0 or ny >= BOARD_SIZE:
-                            continue
-                        # 水域视为封闭
-                        if self.terrain[nx][ny] == TERRAIN_WATER:
-                            continue
-                        # 中立城市视为封闭
-                        if self.board[nx, ny, 2] > 0 and self.board[nx, ny, 0] == 0:
-                            continue
-                        
-                        n_owner = self.board[nx, ny, 0]
-                        
-                        if n_owner == region_owner:
-                            # 相同所有者：加入队列继续探索
-                            if not visited[nx, ny]:
-                                queue.append((nx, ny))
-                        else:
-                            # 不同所有者或无主
-                            if n_owner != 0:
-                                border_owners.add(n_owner)      # 其他玩家领土
-                            else:
-                                border_has_unowned = True       # 无主普通格子
-                
-                # 归属条件：
-                # 1. 区域内无士兵
-                # 2. 边界上只有一个其他玩家
-                # 3. 边界上没有无主普通格子（即被完全包围）
-                if not has_soldiers and len(border_owners) == 1 and not border_has_unowned:
-                    new_owner = next(iter(border_owners))
-                    for x, y in region:
-                        if self.board[x, y, 0] != new_owner:
-                            self.board[x, y, 0] = new_owner
-                            captured_count[new_owner] += 1
-        
-        summary = [f"玩家{player}+{count}格" for player, count in captured_count.items() if count > 0]
-        if summary:
-            self.log.append("包围占领: " + "，".join(summary))
-            self.renderer.mark_board_dirty()
         self.territories_dirty = False
+        self.update_territory_count()
     
     def calculate_steps_per_turn(self):
         if self.round_count <= 5:
@@ -330,6 +266,8 @@ class Game(MapGenerationMixin, AIMixin):
                 terrain_type = self.terrain[i][j]
                 if player > 0 and terrain_type != TERRAIN_WATER:
                     self.territory_count[player] += 1
+        for player, count in self.territory_count.items():
+            self.stats_manager.update_territory(player, count)
     
     def get_terrain_cost(self, from_pos, to_pos):
         """返回移动消耗，非法移动返回 (None, 原因)"""
@@ -556,12 +494,17 @@ class Game(MapGenerationMixin, AIMixin):
         if self.game_mode == MODE_SINGLE_AI and player == self.primary_human:
             self.player_defeated = True
             self.log.append("玩家1已被消灭，进入观战模式。")
-        
+
+        remaining_units = 0
         for i in range(BOARD_SIZE):
             for j in range(BOARD_SIZE):
                 if self.board[i, j, 0] == player:
+                    if self.board[i, j, 1] > 0:
+                        remaining_units += 1
                     self.board[i, j, 0] = 0
                     self.board[i, j, 1] = 0
+        if remaining_units > 0:
+            self.stats_manager.record_unit_lost(player, remaining_units)
         self.mark_territories_dirty(board_changed=True)
     
     def move_soldier(self, from_pos, to_pos):
@@ -586,6 +529,7 @@ class Game(MapGenerationMixin, AIMixin):
         defender_survived = resolved['defender_survived']
         survivor_hp = resolved['survivor_hp']
         terrain_cost = resolved['terrain_cost']
+        target_has_mine = self.resource_map[x2, y2] == RESOURCE_GOLD_MINE
 
         attack_damage_text = None
         if target_player != 0 and target_hp > 0:
@@ -614,6 +558,19 @@ class Game(MapGenerationMixin, AIMixin):
         self.stats_manager.record_move(player)
         if attack_damage_text:
             self.stats_manager.record_attack(player, attacker_survived)
+            if attacker_survived:
+                self.stats_manager.record_unit_lost(target_player, 1)
+            elif defender_survived:
+                self.stats_manager.record_unit_lost(player, 1)
+            else:
+                self.stats_manager.record_unit_lost(player, 1)
+                self.stats_manager.record_unit_lost(target_player, 1)
+
+        if attacker_survived and target_player != player:
+            if target_city_type in (CITY_SMALL, CITY_MAJOR):
+                self.stats_manager.record_capture(player, target_city_type)
+            if target_has_mine:
+                self.stats_manager.record_capture(player, target_city_type, is_mine=True)
 
         # 记录移动历史（只保留最后一次移动用于高亮）
         self.last_move = (from_pos, to_pos)
@@ -703,18 +660,21 @@ class Game(MapGenerationMixin, AIMixin):
                         if city_type == CITY_SMALL:
                             hp += 1
                         elif city_type == CITY_MAJOR:
-                            hp += 2
+                            hp += 3
                         elif city_type == CITY_CAPITAL:
                             hp += 2
                         hp = min(hp, 99)
                         self.board[i, j, 1] = hp
-                        production[player] += 1
-                        if hp != old_hp:
+                        gained = hp - old_hp
+                        production[player] += gained
+                        if gained > 0:
+                            self.stats_manager.record_unit_produced(player, gained)
                             production_changed = True
                     else:
                         hp = 1
                         self.board[i, j, 1] = hp
                         production[player] += 1
+                        self.stats_manager.record_unit_produced(player, 1)
                         production_changed = True
 
         for i in range(BOARD_SIZE):
@@ -730,15 +690,19 @@ class Game(MapGenerationMixin, AIMixin):
                 if hp > 0:
                     new_hp = min(99, hp + 5)
                     self.board[i, j, 1] = new_hp
-                    mine_production[player] += (new_hp - hp)
+                    gained = new_hp - hp
+                    mine_production[player] += gained
+                    if gained > 0:
+                        self.stats_manager.record_unit_produced(player, gained)
                     if new_hp != hp:
                         production_changed = True
                 else:
                     self.board[i, j, 1] = 5
                     mine_production[player] += 5
+                    self.stats_manager.record_unit_produced(player, 5)
                     production_changed = True
         
-        produced_summary = [f"玩家{p}+{v}" for p, v in production.items() if v > 0]
+        produced_summary = [f"玩家{p}+{v}血" for p, v in production.items() if v > 0]
         if produced_summary:
             self.log.append("城市生产: " + "，".join(produced_summary))
         mine_summary = [f"玩家{p}+{v}血" for p, v in mine_production.items() if v > 0]

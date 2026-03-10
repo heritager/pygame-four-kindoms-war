@@ -35,6 +35,13 @@ class Renderer:
         self.combat_effects = []
         self.reset_ui_state()
         self.reset_board_cache()
+        self._init_cached_surfaces()
+
+    def _init_cached_surfaces(self):
+        """预创建可复用的 Surface，避免每帧创建"""
+        # 悬停高亮 Surface
+        self._hover_surface = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        self._hover_surface.fill(COLORS['HOVER'])
 
     def bind_game(self, game):
         self._game = game
@@ -395,10 +402,23 @@ class Renderer:
         if self.hover_pos and not self.show_help:
             hx, hy = self.hover_pos
             if 0 <= hx < BOARD_SIZE and 0 <= hy < BOARD_SIZE:
-                hover_surf = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
-                hover_surf.fill(COLORS['HOVER'])
-                screen.blit(hover_surf, (hy * TILE_SIZE, hx * TILE_SIZE))
+                screen.blit(self._hover_surface, (hy * TILE_SIZE, hx * TILE_SIZE))
                 pygame.draw.rect(screen, (236, 236, 236), (hy * TILE_SIZE, hx * TILE_SIZE, TILE_SIZE, TILE_SIZE), 1)
+
+        # 最后移动高亮显示（半透明箭头）
+        if self._game and self._game.last_move and not self.show_help:
+            from_pos, to_pos = self._game.last_move
+            fx, fy = from_pos
+            tx, ty = to_pos
+            # 绘制起点和终点标记
+            start_rect = pygame.Rect(fy * TILE_SIZE + 4, fx * TILE_SIZE + 4, TILE_SIZE - 8, TILE_SIZE - 8)
+            end_rect = pygame.Rect(ty * TILE_SIZE + 4, tx * TILE_SIZE + 4, TILE_SIZE - 8, TILE_SIZE - 8)
+            pygame.draw.rect(screen, (104, 226, 124), start_rect, 2, border_radius=4)
+            pygame.draw.rect(screen, (104, 226, 124), end_rect, 2, border_radius=4)
+            # 绘制连接线
+            start_center = (fy * TILE_SIZE + TILE_SIZE // 2, fx * TILE_SIZE + TILE_SIZE // 2)
+            end_center = (ty * TILE_SIZE + TILE_SIZE // 2, tx * TILE_SIZE + TILE_SIZE // 2)
+            pygame.draw.line(screen, (104, 226, 124, 180), start_center, end_center, 2)
 
         # 可移动范围
         for pos in self.possible_moves:
@@ -605,7 +625,7 @@ class Renderer:
 
         tips = '左键选择 右键取消 滚轮日志 ESC退出'
         if self.game_mode == MODE_SINGLE_AI:
-            tips = 'F1/F2/F3切换AI难度  M/Backspace返回模式'
+            tips = 'F1/F2/F3/F4切换AI难度  M/Backspace返回模式'
         self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, tips, (ops_box.x + 14, ops_box.y + 194), (188, 194, 204))
 
         # 帮助弹窗
@@ -633,8 +653,8 @@ class Renderer:
                 '1. 平原/山脉: 仅上下左右移动; 涉及山脉移动消耗2步。',
                 '2. 森林: 8方向移动1格; 水域: 曼哈顿距离不超过2格。',
                 '3. 每个士兵每回合最多移动3次。',
-                '4. 回合制生产: 每轮结束后进行城市生产与包围占领。',
-                '5. 金矿每轮为占领方提供+5兵力，有兵则额外+5血量。',
+                '4. 回合制生产: 小城+1，大城+3，首都+2；领土按实际移动落点占领。',
+                '5. 金矿每轮为占领方提供+5兵力；已有驻军时额外+5血量。',
                 '6. 模式支持: 4人本地对战 / 1人对3个AI (M返回模式选择)。',
                 '7. 单人模式下玩家1被淘汰后可观战。',
                 '按 H 或点击右上角 X 关闭帮助。',

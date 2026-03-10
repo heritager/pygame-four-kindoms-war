@@ -4,20 +4,29 @@ pygame.font.init()
 
 
 def get_font(size):
+    """获取字体，优先中文字体，失败时回退到默认字体
+
+    Args:
+        size: 字体大小
+
+    Returns:
+        pygame.font.Font 对象
+    """
     # 优先尝试像素/中文字体名称，pygame 会自动处理回退
-    return pygame.font.SysFont('zpix,simhei,microsoft yahei,wqy-zenhei', size)
+    font = pygame.font.SysFont('zpix,simhei,microsoft yahei,wqy-zenhei', size)
+    # pygame.font.SysFont 在找不到字体时不会返回 None，而是返回默认字体
+    # 但为了保险起见，我们仍然检查 metrics
+    if font is not None and font.size('测试')[0] > 0:
+        return font
+    # 回退到默认字体
+    return pygame.font.Font(None, size)
 
 
+# 初始化所有字体
 CHINESE_FONT_TINY = get_font(14)
 CHINESE_FONT_SMALL = get_font(18)
 CHINESE_FONT_MEDIUM = get_font(22)
 CHINESE_FONT_LARGE = get_font(28)
-
-if CHINESE_FONT_SMALL is None:
-    CHINESE_FONT_TINY = pygame.font.Font(None, 14)
-    CHINESE_FONT_SMALL = pygame.font.Font(None, 18)
-    CHINESE_FONT_MEDIUM = pygame.font.Font(None, 22)
-    CHINESE_FONT_LARGE = pygame.font.Font(None, 28)
 
 
 BOARD_SIZE = 20
@@ -103,9 +112,11 @@ MODE_LABELS = {
 AI_DIFFICULTY_EASY = 'easy'
 AI_DIFFICULTY_NORMAL = 'normal'
 AI_DIFFICULTY_HARD = 'hard'
+AI_DIFFICULTY_LEARNED = 'learned'
 AI_DIFFICULTY_DEFAULT = AI_DIFFICULTY_NORMAL
 AI_DIFFICULTY_LABELS = {
     AI_DIFFICULTY_EASY: '简单',
     AI_DIFFICULTY_NORMAL: '普通',
     AI_DIFFICULTY_HARD: '困难',
+    AI_DIFFICULTY_LEARNED: '学习',
 }

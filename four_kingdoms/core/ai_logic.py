@@ -1,4 +1,5 @@
 import random
+from pathlib import Path
 
 import numpy as np
 import pygame
@@ -6,6 +7,7 @@ import pygame
 from ..config.constants import (
     AI_DIFFICULTY_EASY,
     AI_DIFFICULTY_HARD,
+    AI_DIFFICULTY_LEARNED,
     AI_DIFFICULTY_LABELS,
     AI_DIFFICULTY_NORMAL,
     BOARD_SIZE,
@@ -14,6 +16,8 @@ from ..config.constants import (
     CITY_SMALL,
     RESOURCE_GOLD_MINE,
 )
+from ..ml.action_encoder import EncodedAction, extract_action_features
+from ..ml.policy import load_action_policy
 
 
 # ========== AI 评分常量 ==========
@@ -34,7 +38,7 @@ SCORE_MINE_FULL_BONUS = 40  # 满产额外加分（+12）
 
 # 城市/首都价值
 SCORE_CAPTURE_CAPITAL = 520  # 占领首都
-SCORE_CAPTURE_MAJOR_CITY = 148  # 占领大城市
+SCORE_CAPTURE_MAJOR_CITY = 172  # 占领大城市
 SCORE_CAPTURE_SMALL_CITY = 98  # 占领小城市
 
 # 距离价值
@@ -72,8 +76,212 @@ SCORE_ACTION_POINT_EFFICIENCY = 9  # 每点额外行动点消耗扣分
 # 随机噪声
 NOISE_SCALE = 0.2  # 简单/普通难度随机噪声范围
 
+# 学习策略混合决策
+LEARNED_POLICY_TOP_K = 8
+LEARNED_POLICY_MIN_K = 4
+LEARNED_POLICY_PRIOR_WEIGHT = 24
+LEARNED_POLICY_FOLLOWUP_WEIGHT = 0.65
+
+# 路径 / 支援 / 反重复
+SCORE_PRIORITY_ALIGNMENT = 22
+SCORE_CAPITAL_SUPPORT_PER_HP = 5
+SCORE_CAPITAL_SUPPORT_STEP = 18
+SCORE_CAPITAL_FATAL_THREAT_PENALTY = -180
+SCORE_CAPITAL_THREAT_REDUCED = 24
+SCORE_ASSET_SUPPORT_STEP = 11
+SCORE_ASSET_SUPPORT_PER_HP = 2
+SCORE_REVERSE_MOVE_PENALTY = -42
+SCORE_IDLE_NEUTRAL_DRIFT = -24
+SCORE_FORWARD_PRESSURE = 10
+
 
 class AIMixin:
+    def _load_learned_policy(self):
+        if getattr(self, 'learned_policy', None) is not None:
+            return self.learned_policy
+        policy_paths = getattr(self, 'learned_policy_paths', None)
+        if policy_paths is None:
+            single_path = getattr(self, 'learned_policy_path', '')
+            policy_paths = [single_path] if single_path else []
+
+        existing_paths = [Path(path) for path in policy_paths if Path(path).exists()]
+        if not existing_paths:
+            display_path = Path(policy_paths[0]) if policy_paths else Path('models/linear_policy.npz')
+            self.learned_policy_error = f'未找到学习策略模型: {display_path}'
+            return None
+
+        last_error = None
+        for policy_path in existing_paths:
+            try:
+                self.learned_policy = load_action_policy(policy_path)
+                self.learned_policy_error = None
+                return self.learned_policy
+            except Exception as exc:
+                last_error = f'{policy_path.name}: {exc}'
+
+        self.learned_policy_error = f'学习策略加载失败: {last_error}' if last_error else '学习策略加载失败'
+        return None
+
+    def analyze_board_state(self, player, board_state):
+        strategic_targets = []
+        own_mines = []
+        enemy_units = []
+
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                owner, hp, city_type, _ = board_state[i, j]
+                hp = int(hp)
+                has_mine = self.resource_map[i, j] == RESOURCE_GOLD_MINE
+
+                if owner > 0 and owner != player and hp > 0:
+                    enemy_units.append((i, j, int(owner), hp))
+
+                if has_mine and owner == player and hp > 0:
+                    own_mines.append((i, j))
+
+                is_strategic = False
+                if city_type == CITY_CAPITAL and owner > 0 and owner != player:
+                    is_strategic = True
+                elif city_type in (CITY_MAJOR, CITY_SMALL) and owner != player:
+                    is_strategic = True
+                elif has_mine and owner != player:
+                    is_strategic = True
+
+                if is_strategic:
+                    strategic_targets.append((i, j))
+
+        return {
+            'strategic_targets': strategic_targets,
+            'own_mines': own_mines,
+            'enemy_units': enemy_units,
+        }
+
+    def get_local_friendly_hp(self, player, center_pos, board_state, radius=2):
+        cx, cy = center_pos
+        total_hp = 0
+        for i in range(max(0, cx - radius), min(BOARD_SIZE, cx + radius + 1)):
+            for j in range(max(0, cy - radius), min(BOARD_SIZE, cy + radius + 1)):
+                if abs(i - cx) + abs(j - cy) > radius:
+                    continue
+                owner, hp, _, _ = board_state[i, j]
+                if owner == player and hp > 0:
+                    total_hp += int(hp)
+        return total_hp
+
+    def count_forward_pressure(self, player, pos, board_state):
+        x, y = pos
+        pressure = 0
+        for i in range(max(0, x - 2), min(BOARD_SIZE, x + 3)):
+            for j in range(max(0, y - 2), min(BOARD_SIZE, y + 3)):
+                if abs(i - x) + abs(j - y) > 2:
+                    continue
+                owner, hp, city_type, _ = board_state[i, j]
+                has_mine = self.resource_map[i, j] == RESOURCE_GOLD_MINE
+                if owner > 0 and owner != player and hp > 0:
+                    pressure += 1
+                elif owner != player and (city_type > 0 or has_mine):
+                    pressure += 1
+        return pressure
+
+    def iter_priority_objectives(self, player, board_state, analysis=None, turn_steps=None):
+        board_analysis = analysis or self.analyze_board_state(player, board_state)
+        if turn_steps is None:
+            turn_steps = self.calculate_steps_per_turn()
+
+        objectives = []
+        seen = set()
+
+        for x, y in board_analysis['strategic_targets']:
+            if (x, y) in seen:
+                continue
+            owner, _, city_type, _ = board_state[x, y]
+            has_mine = self.resource_map[x, y] == RESOURCE_GOLD_MINE
+            if city_type == CITY_CAPITAL and owner > 0 and owner != player:
+                weight = 38
+            elif has_mine and owner > 0 and owner != player:
+                weight = 28
+            elif has_mine and owner == 0:
+                weight = 24
+            elif city_type == CITY_MAJOR and owner > 0 and owner != player:
+                weight = 24
+            elif city_type == CITY_MAJOR:
+                weight = 18
+            elif city_type == CITY_SMALL and owner > 0 and owner != player:
+                weight = 15
+            elif city_type == CITY_SMALL:
+                weight = 11
+            else:
+                continue
+            objectives.append(((x, y), float(weight), 'offense'))
+            seen.add((x, y))
+
+        own_capital = self.capitals.get(player)
+        if own_capital is not None and board_state[own_capital[0], own_capital[1], 0] == player:
+            cap_hp = int(board_state[own_capital[0], own_capital[1], 1])
+            cap_threat = self.get_max_enemy_threat_against(
+                player,
+                own_capital,
+                board_state,
+                turn_steps,
+                analysis=board_analysis,
+            )
+            if cap_threat > 0:
+                weight = 42 + max(0, cap_threat - cap_hp) * 2
+                objectives.append((own_capital, float(weight), 'defend_capital'))
+                seen.add(own_capital)
+
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if (i, j) in seen:
+                    continue
+                owner, hp, city_type, _ = board_state[i, j]
+                if owner != player:
+                    continue
+                has_mine = self.resource_map[i, j] == RESOURCE_GOLD_MINE
+                if city_type == 0 and not has_mine:
+                    continue
+                threat = self.get_max_enemy_threat_against(
+                    player,
+                    (i, j),
+                    board_state,
+                    turn_steps,
+                    analysis=board_analysis,
+                )
+                if threat <= 0:
+                    continue
+                asset_hp = int(hp)
+                if has_mine:
+                    base_weight = 22
+                elif city_type == CITY_MAJOR:
+                    base_weight = 16
+                elif city_type == CITY_SMALL:
+                    base_weight = 12
+                else:
+                    continue
+                weight = base_weight + max(0, threat - asset_hp)
+                objectives.append(((i, j), float(weight), 'defend_asset'))
+
+        return objectives
+
+    def get_priority_alignment(self, player, pos, board_state, analysis=None, turn_steps=None):
+        objectives = self.iter_priority_objectives(
+            player,
+            board_state,
+            analysis=analysis,
+            turn_steps=turn_steps,
+        )
+        if not objectives:
+            return 0.0
+
+        x, y = pos
+        best_alignment = 0.0
+        for (tx, ty), weight, _ in objectives:
+            distance = abs(x - tx) + abs(y - ty)
+            alignment = weight / (distance + 1.0)
+            if alignment > best_alignment:
+                best_alignment = alignment
+        return best_alignment
+
     def get_player_soldiers_from_state(self, player, board_state, move_count_state):
         soldiers = []
         for i in range(BOARD_SIZE):
@@ -114,27 +322,15 @@ class AIMixin:
         x, y = pos
         return min(abs(x - cx) + abs(y - cy) for cx, cy in enemy_caps)
 
-    def distance_to_nearest_strategic_target(self, player, pos, board_state):
+    def distance_to_nearest_strategic_target(self, player, pos, board_state, analysis=None):
         x, y = pos
         best_distance = 10**9
+        board_analysis = analysis or self.analyze_board_state(player, board_state)
 
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                owner, _, city_type, _ = board_state[i, j]
-                has_mine = self.resource_map[i, j] == RESOURCE_GOLD_MINE
-
-                is_target = False
-                if city_type == CITY_CAPITAL and owner > 0 and owner != player:
-                    is_target = True
-                elif city_type in (CITY_MAJOR, CITY_SMALL) and owner != player:
-                    is_target = True
-                elif has_mine and owner != player:
-                    is_target = True
-
-                if is_target:
-                    distance = abs(x - i) + abs(y - j)
-                    if distance < best_distance:
-                        best_distance = distance
+        for target_x, target_y in board_analysis['strategic_targets']:
+            distance = abs(x - target_x) + abs(y - target_y)
+            if distance < best_distance:
+                best_distance = distance
 
         return 0 if best_distance == 10**9 else best_distance
 
@@ -159,25 +355,21 @@ class AIMixin:
 
         return count
 
-    def get_max_enemy_threat_against(self, player, target_pos, board_state, enemy_steps):
+    def get_max_enemy_threat_against(self, player, target_pos, board_state, enemy_steps, analysis=None):
         target_x, target_y = target_pos
         max_threat_hp = 0
+        target_owner, target_hp, _, _ = board_state[target_x, target_y]
+        board_analysis = analysis or self.analyze_board_state(player, board_state)
 
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                enemy_player, enemy_hp, _, _ = board_state[i, j]
-                if enemy_player <= 0 or enemy_player == player or enemy_hp <= 0:
-                    continue
+        for enemy_x, enemy_y, enemy_player, enemy_hp in board_analysis['enemy_units']:
+            if target_owner == enemy_player and target_hp > 0:
+                continue
 
-                target_owner, target_hp, _, _ = board_state[target_x, target_y]
-                if target_owner == enemy_player and target_hp > 0:
-                    continue
-
-                terrain_cost, error = self.get_terrain_cost((i, j), target_pos)
-                if error or terrain_cost > enemy_steps:
-                    continue
-                if enemy_hp > max_threat_hp:
-                    max_threat_hp = enemy_hp
+            terrain_cost, error = self.get_terrain_cost((enemy_x, enemy_y), target_pos)
+            if error or terrain_cost > enemy_steps:
+                continue
+            if enemy_hp > max_threat_hp:
+                max_threat_hp = enemy_hp
 
         return max_threat_hp
 
@@ -232,10 +424,27 @@ class AIMixin:
             'to_pos': to_pos,
         }
 
-    def score_ai_move(self, player, from_pos, to_pos, board_state, move_count_state, steps_left, add_noise=True):
+    def score_ai_move(
+        self,
+        player,
+        from_pos,
+        to_pos,
+        board_state,
+        move_count_state,
+        steps_left,
+        add_noise=True,
+        current_analysis=None,
+        turn_steps=None,
+    ):
         simulated = self.simulate_ai_move(player, from_pos, to_pos, board_state, move_count_state, steps_left)
         if simulated is None:
             return -10**9, None
+
+        if turn_steps is None:
+            turn_steps = self.calculate_steps_per_turn()
+        if current_analysis is None:
+            current_analysis = self.analyze_board_state(player, board_state)
+        simulated_analysis = self.analyze_board_state(player, simulated['board'])
 
         score = 0.0
         target_player = simulated['target_player']
@@ -301,12 +510,39 @@ class AIMixin:
             score += SCORE_AWAY_FROM_ENEMY_CAPITAL
 
         # 接近战略目标（城市/首都/金矿）的价值
-        before_obj_dist = self.distance_to_nearest_strategic_target(player, from_pos, board_state)
-        after_obj_dist = self.distance_to_nearest_strategic_target(player, to_pos, simulated['board'])
+        before_obj_dist = self.distance_to_nearest_strategic_target(
+            player,
+            from_pos,
+            board_state,
+            analysis=current_analysis,
+        )
+        after_obj_dist = self.distance_to_nearest_strategic_target(
+            player,
+            to_pos,
+            simulated['board'],
+            analysis=simulated_analysis,
+        )
         if after_obj_dist < before_obj_dist:
             score += (before_obj_dist - after_obj_dist) * SCORE_APPROACH_STRATEGIC_PER_STEP
         elif after_obj_dist > before_obj_dist:
             score += SCORE_AWAY_FROM_STRATEGIC
+
+        # 朝“当前最高优先级目标”收敛：防首都 > 保矿/保城 > 抢矿/夺城/打首都。
+        before_alignment = self.get_priority_alignment(
+            player,
+            from_pos,
+            board_state,
+            analysis=current_analysis,
+            turn_steps=turn_steps,
+        )
+        after_alignment = self.get_priority_alignment(
+            player,
+            to_pos,
+            simulated['board'],
+            analysis=simulated_analysis,
+            turn_steps=turn_steps,
+        )
+        score += (after_alignment - before_alignment) * SCORE_PRIORITY_ALIGNMENT
 
         # 连击潜力：若移动后还能继续威胁战略点，则鼓励推进。
         if attacker_survived and simulated['steps_left'] > 0:
@@ -326,49 +562,99 @@ class AIMixin:
         # 若己方首都受威胁，鼓励回防
         own_capital = self.capitals.get(player)
         if own_capital is not None:
+            cap_hp_before = int(board_state[own_capital[0], own_capital[1], 1])
+            cap_hp_after = int(simulated['board'][own_capital[0], own_capital[1], 1])
+            cap_support_before = self.get_local_friendly_hp(player, own_capital, board_state, radius=2)
+            cap_support_after = self.get_local_friendly_hp(player, own_capital, simulated['board'], radius=2)
+            cap_threat_before = self.get_max_enemy_threat_against(
+                player,
+                own_capital,
+                board_state,
+                turn_steps,
+                analysis=current_analysis,
+            )
             cap_threat = self.get_max_enemy_threat_against(
                 player,
                 own_capital,
                 simulated['board'],
-                self.calculate_steps_per_turn(),
+                turn_steps,
+                analysis=simulated_analysis,
             )
+            if cap_threat_before > cap_threat:
+                score += (cap_threat_before - cap_threat) * SCORE_CAPITAL_THREAT_REDUCED
             if cap_threat > 0:
                 before_own_dist = abs(from_pos[0] - own_capital[0]) + abs(from_pos[1] - own_capital[1])
                 after_own_dist = abs(to_pos[0] - own_capital[0]) + abs(to_pos[1] - own_capital[1])
+                score += (cap_support_after - cap_support_before) * SCORE_CAPITAL_SUPPORT_PER_HP
                 if after_own_dist < before_own_dist:
                     score += SCORE_DEFEND_CAPITAL_APPROACH
                 elif after_own_dist > before_own_dist:
                     score += SCORE_DEFEND_CAPITAL_AWAY
+                if before_own_dist <= 2 and after_own_dist > before_own_dist:
+                    score -= SCORE_CAPITAL_SUPPORT_STEP
+                elif after_own_dist <= 1 and attacker_survived:
+                    score += SCORE_CAPITAL_SUPPORT_STEP
+            if cap_threat_before >= max(1, cap_hp_before) and cap_threat >= max(1, cap_hp_after):
+                score += SCORE_CAPITAL_FATAL_THREAT_PENALTY
+                if from_pos == own_capital:
+                    score += SCORE_CAPITAL_FATAL_THREAT_PENALTY * 0.5
 
         # 若己方金矿受威胁，鼓励回防（金矿是重要资源）
-        own_mines = []
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                if self.resource_map[i, j] == RESOURCE_GOLD_MINE:
-                    mine_owner = simulated['board'][i, j, 0]
-                    mine_hp = simulated['board'][i, j, 1]
-                    if mine_owner == player and mine_hp > 0:
-                        own_mines.append((i, j))
-
-        for mine_pos in own_mines:
+        for mine_pos in current_analysis['own_mines']:
             mine_threat = self.get_max_enemy_threat_against(
                 player,
                 mine_pos,
-                simulated['board'],
-                self.calculate_steps_per_turn(),
+                board_state,
+                turn_steps,
+                analysis=current_analysis,
             )
             if mine_threat > 0:
+                mine_support_before = self.get_local_friendly_hp(player, mine_pos, board_state, radius=1)
+                mine_support_after = self.get_local_friendly_hp(player, mine_pos, simulated['board'], radius=1)
                 before_mine_dist = abs(from_pos[0] - mine_pos[0]) + abs(from_pos[1] - mine_pos[1])
                 after_mine_dist = abs(to_pos[0] - mine_pos[0]) + abs(to_pos[1] - mine_pos[1])
+                score += (mine_support_after - mine_support_before) * SCORE_ASSET_SUPPORT_PER_HP
                 if after_mine_dist < before_mine_dist:
-                    score += 12  # 回防金矿加分
+                    score += SCORE_ASSET_SUPPORT_STEP
                 elif after_mine_dist > before_mine_dist:
-                    score -= 8  # 离开金矿减分
+                    score -= 8
+
+        # 受威胁城市也要有守军，避免只会抢点不会保点。
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                owner, hp, city_type, _ = board_state[i, j]
+                if owner != player or city_type not in (CITY_SMALL, CITY_MAJOR):
+                    continue
+                city_threat = self.get_max_enemy_threat_against(
+                    player,
+                    (i, j),
+                    board_state,
+                    turn_steps,
+                    analysis=current_analysis,
+                )
+                if city_threat <= 0:
+                    continue
+                city_support_before = self.get_local_friendly_hp(player, (i, j), board_state, radius=1)
+                city_support_after = self.get_local_friendly_hp(player, (i, j), simulated['board'], radius=1)
+                before_city_dist = abs(from_pos[0] - i) + abs(from_pos[1] - j)
+                after_city_dist = abs(to_pos[0] - i) + abs(to_pos[1] - j)
+                score += (city_support_after - city_support_before) * SCORE_ASSET_SUPPORT_PER_HP
+                if after_city_dist < before_city_dist:
+                    score += SCORE_ASSET_SUPPORT_STEP * (1.15 if city_type == CITY_MAJOR else 0.85)
+                elif after_city_dist > before_city_dist and before_city_dist <= 2:
+                    score -= 6
+                if after_city_dist == 0 and attacker_survived:
+                    score += 10
 
         # 威胁评估：避免走到下一手可被轻易反杀的位置
         if attacker_survived:
-            enemy_steps = self.calculate_steps_per_turn()
-            threat_hp = self.get_max_enemy_threat_against(player, to_pos, simulated['board'], enemy_steps)
+            threat_hp = self.get_max_enemy_threat_against(
+                player,
+                to_pos,
+                simulated['board'],
+                turn_steps,
+                analysis=simulated_analysis,
+            )
             survivor_hp = simulated['survivor_hp']
             if target_is_enemy_capital:
                 risk_factor = RISK_FACTOR_ENEMY_CAPITAL
@@ -389,6 +675,19 @@ class AIMixin:
         # 行动点效率
         score -= (simulated['terrain_cost'] - 1) * SCORE_ACTION_POINT_EFFICIENCY
 
+        # 减少“来回横跳”的重复步骤，优先持续推进。
+        if board_state is self.board and getattr(self, 'last_move', None) == (to_pos, from_pos):
+            score += SCORE_REVERSE_MOVE_PENALTY
+
+        # 空地扩张如果既不接近目标，也不形成前压，就视为低质量漂移。
+        if target_player == 0 and target_city_type == 0 and not target_has_mine:
+            pressure_before = self.count_forward_pressure(player, from_pos, board_state)
+            pressure_after = self.count_forward_pressure(player, to_pos, simulated['board'])
+            if pressure_after > pressure_before:
+                score += SCORE_FORWARD_PRESSURE * (pressure_after - pressure_before)
+            elif after_alignment <= before_alignment:
+                score += SCORE_IDLE_NEUTRAL_DRIFT
+
         # 普通/简单难度允许轻微随机打破同分；困难模式会关闭噪声。
         if add_noise:
             score += random.random() * NOISE_SCALE
@@ -406,9 +705,20 @@ class AIMixin:
         if steps_left <= 0:
             return 0.0
 
+        current_analysis = self.analyze_board_state(player, board_state)
+        turn_steps = self.calculate_steps_per_turn()
         scored = []
         for from_pos, to_pos in self.enumerate_ai_actions(player, board_state, move_count_state, steps_left):
-            score, _ = self.score_ai_move(player, from_pos, to_pos, board_state, move_count_state, steps_left)
+            score, _ = self.score_ai_move(
+                player,
+                from_pos,
+                to_pos,
+                board_state,
+                move_count_state,
+                steps_left,
+                current_analysis=current_analysis,
+                turn_steps=turn_steps,
+            )
             scored.append(score)
 
         if not scored:
@@ -434,7 +744,7 @@ class AIMixin:
                     if city_type == CITY_CAPITAL:
                         score += 260
                     elif city_type == CITY_MAJOR:
-                        score += 72
+                        score += 92
                     elif city_type == CITY_SMALL:
                         score += 40
                     if has_mine:
@@ -444,7 +754,7 @@ class AIMixin:
                     if city_type == CITY_CAPITAL:
                         score -= 200
                     elif city_type == CITY_MAJOR:
-                        score -= 52
+                        score -= 68
                     elif city_type == CITY_SMALL:
                         score -= 28
                     if has_mine:
@@ -468,6 +778,8 @@ class AIMixin:
         limit=16,
         add_noise=True,
     ):
+        current_analysis = self.analyze_board_state(player, board_state)
+        turn_steps = self.calculate_steps_per_turn()
         ranked = []
         for from_pos, to_pos in self.enumerate_ai_actions(player, board_state, move_count_state, steps_left):
             action_score, simulated = self.score_ai_move(
@@ -478,6 +790,8 @@ class AIMixin:
                 move_count_state,
                 steps_left,
                 add_noise=add_noise,
+                current_analysis=current_analysis,
+                turn_steps=turn_steps,
             )
             if simulated is None:
                 continue
@@ -595,10 +909,19 @@ class AIMixin:
 
         beam_width = 16
         candidates = []
+        current_analysis = self.analyze_board_state(player, self.board)
+        turn_steps = self.calculate_steps_per_turn()
 
         for from_pos, to_pos in first_actions:
             immediate_score, simulated = self.score_ai_move(
-                player, from_pos, to_pos, self.board, self.move_count_grid, self.steps_left
+                player,
+                from_pos,
+                to_pos,
+                self.board,
+                self.move_count_grid,
+                self.steps_left,
+                current_analysis=current_analysis,
+                turn_steps=turn_steps,
             )
             if simulated is None:
                 continue
@@ -664,12 +987,119 @@ class AIMixin:
 
         return best_action, best_value
 
+    def choose_ai_action_learned(self, player):
+        policy = self._load_learned_policy()
+        if policy is None:
+            if hasattr(self, 'log') and self.learned_policy_error:
+                self.log.append(f'{self.learned_policy_error}，回退到普通AI')
+                self.learned_policy_error = None
+            return self.choose_ai_action_normal(player)
+
+        actions = self.enumerate_ai_actions(player, self.board, self.move_count_grid, self.steps_left)
+        if not actions:
+            return None, None
+
+        current_analysis = self.analyze_board_state(player, self.board)
+        turn_steps = self.calculate_steps_per_turn()
+        feature_rows = []
+        for from_pos, to_pos in actions:
+            feature_rows.append(
+                (
+                    from_pos,
+                    to_pos,
+                    self._extract_learned_features(from_pos, to_pos, current_analysis, turn_steps),
+                )
+            )
+
+        if not feature_rows:
+            return None, None
+
+        feature_matrix = np.stack([row[2] for row in feature_rows], axis=0)
+        policy_scores = policy.score_candidates(feature_matrix)
+        if policy_scores.size == 0:
+            return None, None
+
+        heuristic_ranked = self._rank_actions_for_player(
+            player,
+            self.board,
+            self.move_count_grid,
+            self.steps_left,
+            limit=2,
+            add_noise=False,
+        )
+        action_index_map = {
+            (from_pos, to_pos): index for index, (from_pos, to_pos, _) in enumerate(feature_rows)
+        }
+        candidate_indices = set()
+
+        top_k = min(
+            len(feature_rows),
+            max(LEARNED_POLICY_MIN_K, min(LEARNED_POLICY_TOP_K, len(feature_rows))),
+        )
+        policy_order = np.argsort(policy_scores)[::-1]
+        candidate_indices.update(int(index) for index in policy_order[:top_k])
+
+        for _, from_pos, to_pos, _ in heuristic_ranked:
+            mapped_index = action_index_map.get((from_pos, to_pos))
+            if mapped_index is not None:
+                candidate_indices.add(mapped_index)
+
+        score_std = float(np.std(policy_scores))
+        score_mean = float(np.mean(policy_scores))
+        score_scale = score_std if score_std > 1e-6 else 1.0
+
+        best_action = None
+        best_score = -10**9
+        for candidate_index in candidate_indices:
+            from_pos, to_pos, _ = feature_rows[candidate_index]
+            immediate_score, simulated = self.score_ai_move(
+                player,
+                from_pos,
+                to_pos,
+                self.board,
+                self.move_count_grid,
+                self.steps_left,
+                add_noise=False,
+                current_analysis=current_analysis,
+                turn_steps=turn_steps,
+            )
+            if simulated is None:
+                continue
+
+            followup_score = self.estimate_best_followup_score(
+                player,
+                simulated['board'],
+                simulated['move_count'],
+                simulated['steps_left'],
+                limit=12,
+            )
+            policy_prior = ((float(policy_scores[candidate_index]) - score_mean) / score_scale) * LEARNED_POLICY_PRIOR_WEIGHT
+            combined_score = immediate_score + followup_score * LEARNED_POLICY_FOLLOWUP_WEIGHT + policy_prior
+            if combined_score > best_score:
+                best_score = combined_score
+                best_action = (from_pos, to_pos)
+
+        if best_action is None:
+            return self.choose_ai_action_normal(player)
+        return best_action, best_score
+
+    def _extract_learned_features(self, from_pos, to_pos, current_analysis, turn_steps):
+        action = EncodedAction(from_pos=from_pos, to_pos=to_pos, action_id=-1)
+        return extract_action_features(
+            self,
+            action,
+            current_analysis=current_analysis,
+            turn_steps=turn_steps,
+        )
+
     def choose_ai_action(self, player):
         difficulty = getattr(self, 'ai_difficulty', AI_DIFFICULTY_NORMAL)
         if difficulty == AI_DIFFICULTY_EASY:
             return self.choose_ai_action_easy(player)
         if difficulty == AI_DIFFICULTY_HARD:
             return self.choose_ai_action_hard(player)
+        if difficulty == AI_DIFFICULTY_LEARNED:
+            return self.choose_ai_action_learned(player)
         return self.choose_ai_action_normal(player)
 
     def perform_ai_action(self):
