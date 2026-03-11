@@ -34,7 +34,57 @@ from ..audio import (
 from ..stats import get_statistics_manager
 from .ai_logic import AIMixin
 from .map_generation import MapGenerationMixin
-from ..ui.renderer import Renderer
+
+
+class _HeadlessRenderer:
+    show_help = False
+
+    def reset_effects(self):
+        return None
+
+    def reset_ui_state(self):
+        return None
+
+    def reset_board_cache(self):
+        return None
+
+    def mark_board_dirty(self):
+        return None
+
+    def add_combat_effect(self, pos, text):
+        return None
+
+    def add_move_animation(self, from_pos, to_pos, player, hp):
+        return None
+
+    def draw(self, game, screen):
+        return None
+
+
+class _HeadlessStatsManager:
+    def start_new_game(self, game):
+        return None
+
+    def record_move(self, player_id):
+        return None
+
+    def record_attack(self, player_id, won):
+        return None
+
+    def record_capture(self, player_id, city_type, is_capital=False, is_mine=False):
+        return None
+
+    def record_unit_produced(self, player_id, count=1):
+        return None
+
+    def record_unit_lost(self, player_id, count=1):
+        return None
+
+    def update_territory(self, player_id, count):
+        return None
+
+    def end_game(self, game):
+        return None
 
 
 class Game(MapGenerationMixin, AIMixin):
@@ -43,14 +93,21 @@ class Game(MapGenerationMixin, AIMixin):
         game_mode=MODE_SINGLE_AI,
         map_preset_id=DEFAULT_MAP_PRESET,
         ai_difficulty=AI_DIFFICULTY_DEFAULT,
+        headless=False,
     ):
+        self.headless = bool(headless)
         self.game_mode = game_mode
         self.primary_human = 1
         self.map_preset = get_map_preset(map_preset_id)
         self.map_preset_id = self.map_preset['id']
         self.map_name = self.map_preset['name']
-        self.renderer = Renderer()
+        if self.headless:
+            self.renderer = _HeadlessRenderer()
+        else:
+            from ..ui.renderer import Renderer
+            self.renderer = Renderer()
         self.ai_difficulty = AI_DIFFICULTY_DEFAULT
+        self.ai_search_profile = 'standard'
         self.learned_policy = None
         models_dir = Path(__file__).resolve().parents[2] / 'models'
         self.learned_policy_paths = [
@@ -60,8 +117,13 @@ class Game(MapGenerationMixin, AIMixin):
         self.learned_policy_path = self.learned_policy_paths[0]
         self.learned_policy_error = None
         self.set_ai_difficulty(ai_difficulty, announce=False)
-        self.stats_manager = get_statistics_manager()
+        self.stats_manager = _HeadlessStatsManager() if self.headless else get_statistics_manager()
         self.reset_game()
+
+    def _play_sound(self, sound_id):
+        if self.headless:
+            return
+        play_sound(sound_id)
         
     def reset_game(self):
         # 初始化地形
@@ -468,7 +530,7 @@ class Game(MapGenerationMixin, AIMixin):
                 self.log.append(f"游戏结束！玩家{self.winner}获胜!")
                 # 播放胜利音效（如果是人类玩家获胜）
                 if self.winner in self.human_players:
-                    play_sound(SOUND_VICTORY)
+                    self._play_sound(SOUND_VICTORY)
             else:
                 self.log.append("游戏结束！所有玩家均被消灭!")
             self.selected_pos = None
@@ -546,13 +608,13 @@ class Game(MapGenerationMixin, AIMixin):
         # 播放音效
         if target_player != 0 and target_hp > 0:
             if attacker_survived and target_city_type == CITY_CAPITAL:
-                play_sound(SOUND_CAPTURE_CAPITAL)
+                self._play_sound(SOUND_CAPTURE_CAPITAL)
             elif attacker_survived:
-                play_sound(SOUND_CAPTURE)
+                self._play_sound(SOUND_CAPTURE)
             else:
-                play_sound(SOUND_ATTACK)
+                self._play_sound(SOUND_ATTACK)
         else:
-            play_sound(SOUND_MOVE)
+            self._play_sound(SOUND_MOVE)
 
         # 记录统计
         self.stats_manager.record_move(player)
@@ -631,6 +693,7 @@ class Game(MapGenerationMixin, AIMixin):
         
         # 重置所有士兵移动计数
         self.move_count_grid = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
+        self.renderer.mark_units_dirty()
         
         # 重置选中位置和可移动范围
         self.selected_pos = None
@@ -677,30 +740,26 @@ class Game(MapGenerationMixin, AIMixin):
                         self.stats_manager.record_unit_produced(player, 1)
                         production_changed = True
 
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                if self.resource_map[i, j] != RESOURCE_GOLD_MINE:
-                    continue
+        for i, j in self.gold_mine_positions:
+            player = self.board[i, j, 0]
+            if player <= 0:
+                continue
 
-                player = self.board[i, j, 0]
-                if player <= 0:
-                    continue
-
-                hp = self.board[i, j, 1]
-                if hp > 0:
-                    new_hp = min(99, hp + 5)
-                    self.board[i, j, 1] = new_hp
-                    gained = new_hp - hp
-                    mine_production[player] += gained
-                    if gained > 0:
-                        self.stats_manager.record_unit_produced(player, gained)
-                    if new_hp != hp:
-                        production_changed = True
-                else:
-                    self.board[i, j, 1] = 5
-                    mine_production[player] += 5
-                    self.stats_manager.record_unit_produced(player, 5)
+            hp = self.board[i, j, 1]
+            if hp > 0:
+                new_hp = min(99, hp + 5)
+                self.board[i, j, 1] = new_hp
+                gained = new_hp - hp
+                mine_production[player] += gained
+                if gained > 0:
+                    self.stats_manager.record_unit_produced(player, gained)
+                if new_hp != hp:
                     production_changed = True
+            else:
+                self.board[i, j, 1] = 5
+                mine_production[player] += 5
+                self.stats_manager.record_unit_produced(player, 5)
+                production_changed = True
         
         produced_summary = [f"玩家{p}+{v}血" for p, v in production.items() if v > 0]
         if produced_summary:

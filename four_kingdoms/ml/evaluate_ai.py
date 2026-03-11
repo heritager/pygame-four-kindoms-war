@@ -15,7 +15,6 @@ from ..config.constants import (
     AI_DIFFICULTY_LEARNED,
     AI_DIFFICULTY_NORMAL,
     MODE_SINGLE_AI,
-    RESOURCE_GOLD_MINE,
 )
 from ..config.map_presets import DEFAULT_MAP_PRESET
 from ..core.game_core import Game
@@ -28,36 +27,68 @@ AI_CHOICES = [
     AI_DIFFICULTY_LEARNED,
 ]
 
+SUITE_CHOICES = [
+    AI_DIFFICULTY_EASY,
+    AI_DIFFICULTY_NORMAL,
+    AI_DIFFICULTY_HARD,
+    AI_DIFFICULTY_LEARNED,
+]
+
 
 def _count_player_mines(game, player):
-    mines = 0
-    for i in range(game.board.shape[0]):
-        for j in range(game.board.shape[1]):
-            if game.resource_map[i, j] == RESOURCE_GOLD_MINE and int(game.board[i, j, 0]) == player:
-                mines += 1
-    return mines
+    return sum(1 for i, j in game.gold_mine_positions if int(game.board[i, j, 0]) == player)
 
 
-def _build_game(map_preset_id, default_difficulty):
+def _state_signature(game):
+    signature = []
+    for player in sorted(game.players):
+        capital_pos = game.capitals.get(player)
+        capital_owner = None
+        if capital_pos is not None:
+            capital_owner = int(game.board[capital_pos[0], capital_pos[1], 0])
+        signature.append(
+            (
+                int(player),
+                int(game.territory_count.get(player, 0)),
+                int(_count_player_mines(game, player)),
+                capital_owner,
+            )
+        )
+    return tuple(signature)
+
+
+def _build_game(map_preset_id, default_difficulty, persist_stats=False):
     game = Game(
         game_mode=MODE_SINGLE_AI,
         map_preset_id=map_preset_id,
         ai_difficulty=default_difficulty,
+        headless=not persist_stats,
     )
     game.human_players = set()
     game.ai_players = set(game.players)
+    game.ai_search_profile = 'benchmark'
     return game
 
 
-def _play_one_game(candidate_difficulty, opponent_difficulty, candidate_player, map_preset_id, max_rounds):
-    game = _build_game(map_preset_id, opponent_difficulty)
+def _play_one_game(
+    candidate_difficulty,
+    opponent_difficulty,
+    candidate_player,
+    map_preset_id,
+    max_rounds,
+    max_moves=None,
+    stagnation_limit=120,
+):
+    game = _build_game(map_preset_id, opponent_difficulty, persist_stats=False)
     per_player_difficulty = {
         player: (candidate_difficulty if player == candidate_player else opponent_difficulty)
         for player in game.players
     }
 
     move_counter = 0
-    max_moves = max(1, max_rounds) * 80
+    max_moves = int(max_moves) if max_moves is not None else max(80, max(1, max_rounds) * 8)
+    state_signature = _state_signature(game)
+    stagnant_moves = 0
 
     while not game.game_over and game.round_count <= max_rounds and move_counter < max_moves:
         if game.current_player not in game.players:
@@ -76,7 +107,16 @@ def _play_one_game(candidate_difficulty, opponent_difficulty, candidate_player, 
                 game.steps_left = 0
 
         move_counter += 1
+        new_signature = _state_signature(game)
+        if new_signature == state_signature:
+            stagnant_moves += 1
+        else:
+            stagnant_moves = 0
+            state_signature = new_signature
+
         if game.game_over:
+            break
+        if stagnant_moves >= stagnation_limit:
             break
         if game.steps_left <= 0:
             game.next_player()
@@ -113,6 +153,8 @@ def evaluate_difficulty(
     games=12,
     map_preset_id=DEFAULT_MAP_PRESET,
     max_rounds=120,
+    max_moves=None,
+    stagnation_limit=120,
     seed=7,
 ):
     random.seed(seed)
@@ -128,6 +170,8 @@ def evaluate_difficulty(
                 candidate_player,
                 map_preset_id,
                 max_rounds=max_rounds,
+                max_moves=max_moves,
+                stagnation_limit=stagnation_limit,
             )
         )
 
@@ -154,25 +198,8 @@ def evaluate_difficulty(
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Evaluate built-in AI difficulties with a low-memory headless benchmark.')
-    parser.add_argument('--candidate', default=AI_DIFFICULTY_LEARNED, choices=AI_CHOICES, help='Difficulty being evaluated')
-    parser.add_argument('--opponent', default=AI_DIFFICULTY_NORMAL, choices=AI_CHOICES, help='Difficulty used by the other three players')
-    parser.add_argument('--games', type=int, default=12, help='Number of games to benchmark')
-    parser.add_argument('--max-rounds', type=int, default=120, help='Round cap before using territory tiebreak')
-    parser.add_argument('--map', dest='map_preset_id', default=DEFAULT_MAP_PRESET, help='Map preset id')
-    parser.add_argument('--seed', type=int, default=7, help='Random seed')
-    args = parser.parse_args()
-
-    summary = evaluate_difficulty(
-        args.candidate,
-        opponent_difficulty=args.opponent,
-        games=args.games,
-        map_preset_id=args.map_preset_id,
-        max_rounds=args.max_rounds,
-        seed=args.seed,
-    )
-    print(
+def _format_summary_line(summary):
+    return (
         'candidate={candidate} opponent={opponent} games={games} wins={wins} win_rate={win_rate:.3f} '
         'avg_rounds={avg_rounds:.1f} avg_territory={avg_territory:.1f} avg_mines={avg_mines:.2f} '
         'timeouts={timeouts}'.format(
@@ -187,6 +214,69 @@ def main():
             timeouts=summary['timeouts'],
         )
     )
+
+
+def _print_suite_table(summaries):
+    header = '{:<8} {:>5} {:>8} {:>10} {:>10} {:>8}'.format('难度', '胜场', '胜率', '平均轮数', '平均领土', '超时')
+    print(header)
+    print('-' * len(header))
+    for summary in summaries:
+        print(
+            '{:<8} {:>5} {:>8.3f} {:>10.1f} {:>10.1f} {:>8}'.format(
+                AI_DIFFICULTY_LABELS[summary['candidate_difficulty']],
+                summary['wins'],
+                summary['win_rate'],
+                summary['avg_rounds'],
+                summary['avg_territory'],
+                summary['timeouts'],
+            )
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate built-in AI difficulties with a bounded low-memory headless benchmark.')
+    parser.add_argument('--candidate', default=AI_DIFFICULTY_LEARNED, choices=AI_CHOICES, help='Difficulty being evaluated')
+    parser.add_argument('--opponent', default=AI_DIFFICULTY_NORMAL, choices=AI_CHOICES, help='Difficulty used by the other three players')
+    parser.add_argument('--suite', action='store_true', help='Run easy/normal/hard/learned as one comparison table')
+    parser.add_argument('--games', type=int, default=4, help='Number of games to benchmark')
+    parser.add_argument('--max-rounds', type=int, default=20, help='Round cap before using territory tiebreak')
+    parser.add_argument('--max-moves', type=int, default=None, help='Hard cap on total actions per game')
+    parser.add_argument('--stagnation-limit', type=int, default=120, help='End the game early if the board signature stops changing for this many actions')
+    parser.add_argument('--map', dest='map_preset_id', default=DEFAULT_MAP_PRESET, help='Map preset id')
+    parser.add_argument('--seed', type=int, default=7, help='Random seed')
+    args = parser.parse_args()
+
+    if args.suite:
+        summaries = []
+        for index, candidate in enumerate(SUITE_CHOICES):
+            summaries.append(
+                evaluate_difficulty(
+                    candidate,
+                    opponent_difficulty=args.opponent,
+                    games=args.games,
+                    map_preset_id=args.map_preset_id,
+                    max_rounds=args.max_rounds,
+                    max_moves=args.max_moves,
+                    stagnation_limit=args.stagnation_limit,
+                    seed=args.seed + index,
+                )
+            )
+        _print_suite_table(summaries)
+        for summary in summaries:
+            print(_format_summary_line(summary))
+        return
+
+    summary = evaluate_difficulty(
+        args.candidate,
+        opponent_difficulty=args.opponent,
+        games=args.games,
+        map_preset_id=args.map_preset_id,
+        max_rounds=args.max_rounds,
+        max_moves=args.max_moves,
+        stagnation_limit=args.stagnation_limit,
+        seed=args.seed,
+    )
+    print(_format_summary_line(summary))
     print('seat_wins=' + ','.join(f'P{player}:{wins}' for player, wins in summary['seat_wins'].items()))
 
 

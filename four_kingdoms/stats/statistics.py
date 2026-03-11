@@ -10,6 +10,20 @@ import os
 from datetime import datetime
 
 
+def _to_jsonable(value: Any) -> Any:
+    """Recursively convert numpy scalars and other container values into JSON-safe builtins."""
+    if isinstance(value, dict):
+        return {str(_to_jsonable(key)): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(item) for item in value]
+    if hasattr(value, 'item') and callable(value.item):
+        try:
+            return _to_jsonable(value.item())
+        except Exception:
+            return value
+    return value
+
+
 @dataclass
 class PlayerStats:
     """玩家统计数据"""
@@ -27,7 +41,7 @@ class PlayerStats:
     rounds_survived: int = 0  # 存活轮数
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        return _to_jsonable({
             'player_id': self.player_id,
             'moves_made': self.moves_made,
             'attacks_made': self.attacks_made,
@@ -40,7 +54,7 @@ class PlayerStats:
             'units_lost': self.units_lost,
             'territory_peak': self.territory_peak,
             'rounds_survived': self.rounds_survived,
-        }
+        })
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PlayerStats':
@@ -62,7 +76,7 @@ class GameStats:
     total_captures: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        return _to_jsonable({
             'timestamp': self.timestamp,
             'game_mode': self.game_mode,
             'map_name': self.map_name,
@@ -73,7 +87,7 @@ class GameStats:
             'total_moves': self.total_moves,
             'total_attacks': self.total_attacks,
             'total_captures': self.total_captures,
-        }
+        })
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GameStats':
@@ -110,6 +124,8 @@ class StatisticsManager:
 
         self.stats_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'stats')
         os.makedirs(self.stats_dir, exist_ok=True)
+        self.history_json_path = os.path.join(self.stats_dir, 'game_history.json')
+        self.history_jsonl_path = os.path.join(self.stats_dir, 'game_history.jsonl')
 
         # 当前游戏统计
         self.current_game_stats: Optional[GameStats] = None
@@ -301,10 +317,24 @@ class StatisticsManager:
 
     def _load_history(self):
         """加载历史记录"""
-        history_path = os.path.join(self.stats_dir, 'game_history.json')
-        if os.path.exists(history_path):
+        if os.path.exists(self.history_jsonl_path):
             try:
-                with open(history_path, 'r', encoding='utf-8') as f:
+                history = []
+                with open(self.history_jsonl_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        history.append(GameStats.from_dict(json.loads(line)))
+                self.game_history = history
+                return
+            except (json.JSONDecodeError, IOError, ValueError):
+                self.game_history = []
+                return
+
+        if os.path.exists(self.history_json_path):
+            try:
+                with open(self.history_json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 self.game_history = [GameStats.from_dict(g) for g in data]
             except (json.JSONDecodeError, IOError):
@@ -312,10 +342,17 @@ class StatisticsManager:
 
     def _save_history(self):
         """保存历史记录"""
-        history_path = os.path.join(self.stats_dir, 'game_history.json')
+        if not self.game_history:
+            return
         try:
-            with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump([g.to_dict() for g in self.game_history], f, ensure_ascii=False, indent=2)
+            if not os.path.exists(self.history_jsonl_path):
+                records = self.game_history
+                with open(self.history_jsonl_path, 'w', encoding='utf-8') as f:
+                    for game_stats in records:
+                        f.write(json.dumps(_to_jsonable(game_stats.to_dict()), ensure_ascii=False) + '\n')
+            else:
+                with open(self.history_jsonl_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(_to_jsonable(self.game_history[-1].to_dict()), ensure_ascii=False) + '\n')
         except IOError as e:
             print(f"保存历史记录失败：{e}")
 
@@ -334,7 +371,7 @@ class StatisticsManager:
         achievements_path = os.path.join(self.stats_dir, 'achievements.json')
         try:
             with open(achievements_path, 'w', encoding='utf-8') as f:
-                json.dump(self.achievements_progress, f, ensure_ascii=False, indent=2)
+                json.dump(_to_jsonable(self.achievements_progress), f, ensure_ascii=False, indent=2)
         except IOError as e:
             print(f"保存成就进度失败：{e}")
 

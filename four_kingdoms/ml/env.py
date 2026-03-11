@@ -6,7 +6,7 @@ os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 
 import numpy as np
 
-from ..config.constants import AI_DIFFICULTY_NORMAL, MODE_SINGLE_AI, RESOURCE_GOLD_MINE
+from ..config.constants import AI_DIFFICULTY_NORMAL, MODE_SINGLE_AI
 from ..config.map_presets import DEFAULT_MAP_PRESET
 from ..core.game_core import Game
 from .action_encoder import action_from_id, encode_observation, enumerate_legal_actions, extract_action_features
@@ -33,6 +33,7 @@ class HeadlessGameEnv:
             game_mode=self.game_mode,
             map_preset_id=self.map_preset_id,
             ai_difficulty=self.ai_difficulty,
+            headless=True,
         )
         if self.all_ai:
             self.game.human_players = set()
@@ -106,12 +107,7 @@ class HeadlessGameEnv:
         }
 
     def _count_owned_mines(self, actor):
-        owned_mines = 0
-        for i in range(self.game.board.shape[0]):
-            for j in range(self.game.board.shape[1]):
-                if self.game.resource_map[i, j] == RESOURCE_GOLD_MINE and int(self.game.board[i, j, 0]) == actor:
-                    owned_mines += 1
-        return owned_mines
+        return sum(1 for i, j in self.game.gold_mine_positions if int(self.game.board[i, j, 0]) == actor)
 
     def _compute_reward(self, actor, before):
         capital_pos = self.game.capitals.get(actor)
