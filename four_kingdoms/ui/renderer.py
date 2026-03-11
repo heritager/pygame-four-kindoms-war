@@ -52,12 +52,19 @@ class Renderer:
 
     def reset_board_cache(self):
         self._terrain_surface = None
-        self._board_overlay_surface = None
+        self._static_overlay_surface = None
+        self._dynamic_overlay_surface = None
+        self._units_surface = None
         self._water_tiles = []
         self._board_dirty = True
+        self._units_dirty = True
 
     def mark_board_dirty(self):
         self._board_dirty = True
+        self._units_dirty = True
+
+    def mark_units_dirty(self):
+        self._units_dirty = True
 
     def reset_ui_state(self):
         self.show_help = False
@@ -354,37 +361,64 @@ class Renderer:
                     pygame.draw.rect(surface, COLORS['CITY'], (x + TILE_SIZE // 3, y + TILE_SIZE // 2, TILE_SIZE // 3, TILE_SIZE // 2))
                     pygame.draw.rect(surface, (156, 140, 124), (x + TILE_SIZE // 4, y + TILE_SIZE // 2, TILE_SIZE // 2, TILE_SIZE // 8))
 
-    def _draw_gold_mines(self, surface):
+    def _draw_gold_mines(self, surface, draw_owner_frames=True):
+        for i, j in self.gold_mine_positions:
+            x = j * TILE_SIZE
+            y = i * TILE_SIZE
+            icon_x = x + TILE_SIZE // 2 - 8
+            icon_y = y + TILE_SIZE // 2 - 8
+            glow = pygame.Surface((18, 18), pygame.SRCALPHA)
+            glow.fill((255, 220, 80, 56))
+            surface.blit(glow, (icon_x - 1, icon_y - 1))
+            self.draw_hud_legend_icon(surface, 'gold_mine', icon_x, icon_y, size=16)
+
+            mine_owner = self.board[i, j, 0]
+            if draw_owner_frames and mine_owner > 0:
+                pygame.draw.rect(
+                    surface,
+                    COLORS[mine_owner],
+                    (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8),
+                    1,
+                    border_radius=4,
+                )
+
+    def _rebuild_static_overlay_surface(self):
+        self._static_overlay_surface = pygame.Surface((BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE), pygame.SRCALPHA)
+        self._draw_cities(self._static_overlay_surface)
+        self._draw_gold_mines(self._static_overlay_surface, draw_owner_frames=False)
+
+    def _rebuild_dynamic_overlay_surface(self):
+        self._dynamic_overlay_surface = pygame.Surface((BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE), pygame.SRCALPHA)
+        self.draw_territory_borders(self._dynamic_overlay_surface)
+        self._draw_gold_mines(self._dynamic_overlay_surface, draw_owner_frames=True)
+        self._board_dirty = False
+
+    def _draw_static_units(self, surface, skip_positions=None):
+        skip_positions = skip_positions or set()
         for i in range(BOARD_SIZE):
             for j in range(BOARD_SIZE):
-                if self.resource_map[i, j] != RESOURCE_GOLD_MINE:
+                player, hp, _, _ = self.board[i, j]
+                if hp <= 0 or (i, j) in skip_positions:
                     continue
 
-                x = j * TILE_SIZE
-                y = i * TILE_SIZE
-                icon_x = x + TILE_SIZE // 2 - 8
-                icon_y = y + TILE_SIZE // 2 - 8
-                glow = pygame.Surface((18, 18), pygame.SRCALPHA)
-                glow.fill((255, 220, 80, 56))
-                surface.blit(glow, (icon_x - 1, icon_y - 1))
-                self.draw_hud_legend_icon(surface, 'gold_mine', icon_x, icon_y, size=16)
+                center_x = j * TILE_SIZE + TILE_SIZE // 2
+                center_y = i * TILE_SIZE + TILE_SIZE // 2
+                self.draw_soldier_icon(surface, player, hp, (center_x, center_y))
 
-                mine_owner = self.board[i, j, 0]
-                if mine_owner > 0:
-                    pygame.draw.rect(
+                move_count = self.move_count_grid[i, j]
+                if move_count > 0:
+                    self.draw_text_with_shadow(
                         surface,
-                        COLORS[mine_owner],
-                        (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8),
-                        1,
-                        border_radius=4,
+                        CHINESE_FONT_TINY,
+                        f'{move_count}/3',
+                        (j * TILE_SIZE + 2, i * TILE_SIZE + 2),
+                        (255, 250, 210),
                     )
 
-    def _rebuild_board_overlay_surface(self):
-        self._board_overlay_surface = pygame.Surface((BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE), pygame.SRCALPHA)
-        self.draw_territory_borders(self._board_overlay_surface)
-        self._draw_cities(self._board_overlay_surface)
-        self._draw_gold_mines(self._board_overlay_surface)
-        self._board_dirty = False
+    def _rebuild_units_surface(self):
+        self._units_surface = pygame.Surface((BOARD_PIXEL_SIZE, BOARD_PIXEL_SIZE), pygame.SRCALPHA)
+        self._draw_static_units(self._units_surface)
+        self._units_dirty = False
 
     def draw(self, game, screen):
         self.bind_game(game)
@@ -394,9 +428,12 @@ class Renderer:
             self._rebuild_terrain_surface()
         screen.blit(self._terrain_surface, (0, 0))
         self._draw_water_waves(screen, now)
-        if self._board_overlay_surface is None or self._board_dirty:
-            self._rebuild_board_overlay_surface()
-        screen.blit(self._board_overlay_surface, (0, 0))
+        if self._static_overlay_surface is None:
+            self._rebuild_static_overlay_surface()
+        screen.blit(self._static_overlay_surface, (0, 0))
+        if self._dynamic_overlay_surface is None or self._board_dirty:
+            self._rebuild_dynamic_overlay_surface()
+        screen.blit(self._dynamic_overlay_surface, (0, 0))
 
         # 鼠标悬停高亮
         if self.hover_pos and not self.show_help:
@@ -430,21 +467,12 @@ class Renderer:
         animation_targets = {anim['to'] for anim in active_animations}
 
         # 静态单位
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                player, hp, _, _ = self.board[i, j]
-                if hp <= 0:
-                    continue
-                if (i, j) in animation_targets:
-                    continue
-
-                center_x = j * TILE_SIZE + TILE_SIZE // 2
-                center_y = i * TILE_SIZE + TILE_SIZE // 2
-                self.draw_soldier_icon(screen, player, hp, (center_x, center_y))
-
-                move_count = self.move_count_grid[i, j]
-                if move_count > 0:
-                    self.draw_text_with_shadow(screen, CHINESE_FONT_TINY, f'{move_count}/3', (j * TILE_SIZE + 2, i * TILE_SIZE + 2), (255, 250, 210))
+        if not active_animations:
+            if self._units_surface is None or self._units_dirty:
+                self._rebuild_units_surface()
+            screen.blit(self._units_surface, (0, 0))
+        else:
+            self._draw_static_units(screen, skip_positions=animation_targets)
 
         # 动态单位
         for anim in active_animations:
