@@ -35,26 +35,53 @@ def _forward(features, weights, biases):
     return activations, pre_activations
 
 
-def _backward(activations, pre_activations, weights, probs, chosen_index, l2):
+def _backward_batch(activations, pre_activations, weights, probs, chosen_indices, l2):
     grads_w = [None] * len(weights)
     grads_b = [None] * len(weights)
 
-    delta = probs.reshape(-1, 1).astype(np.float32)
-    delta[chosen_index, 0] -= 1.0
+    batch_size = max(1, int(probs.shape[0]))
+    delta = probs.astype(np.float32).copy()
+    delta[np.arange(batch_size), chosen_indices] -= 1.0
+    delta = (delta / batch_size)[..., None]
 
     last_index = len(weights) - 1
-    grads_w[last_index] = activations[last_index].T @ delta + l2 * weights[last_index]
-    grads_b[last_index] = np.sum(delta, axis=0)
+    grads_w[last_index] = np.tensordot(activations[last_index], delta, axes=([0, 1], [0, 1])) + l2 * weights[last_index]
+    grads_b[last_index] = np.sum(delta, axis=(0, 1))
     upstream = delta @ weights[last_index].T
 
     for layer_index in range(last_index - 1, -1, -1):
         relu_grad = (pre_activations[layer_index] > 0).astype(np.float32)
         delta_hidden = upstream * relu_grad
-        grads_w[layer_index] = activations[layer_index].T @ delta_hidden + l2 * weights[layer_index]
-        grads_b[layer_index] = np.sum(delta_hidden, axis=0)
+        grads_w[layer_index] = np.tensordot(
+            activations[layer_index],
+            delta_hidden,
+            axes=([0, 1], [0, 1]),
+        ) + l2 * weights[layer_index]
+        grads_b[layer_index] = np.sum(delta_hidden, axis=(0, 1))
         upstream = delta_hidden @ weights[layer_index].T
 
     return grads_w, grads_b
+
+
+def _iter_bucket_batches(candidate_features, offsets, chosen_indices, sample_order, batch_size):
+    buckets = {}
+    for sample_idx in sample_order:
+        start = int(offsets[sample_idx])
+        end = int(offsets[sample_idx + 1])
+        action_count = end - start
+        if action_count <= 0:
+            continue
+        buckets.setdefault(action_count, []).append((start, end, int(chosen_indices[sample_idx])))
+
+    for action_count, entries in buckets.items():
+        for batch_start in range(0, len(entries), batch_size):
+            batch_entries = entries[batch_start:batch_start + batch_size]
+            feature_batch = np.stack(
+                [candidate_features[start:end] for start, end, _ in batch_entries],
+                axis=0,
+            ).astype(np.float32, copy=False)
+            chosen_batch = np.asarray([chosen for _, _, chosen in batch_entries], dtype=np.int32)
+            yield action_count, feature_batch, chosen_batch
 
 
 def train_tiny_mlp_policy(
@@ -63,6 +90,7 @@ def train_tiny_mlp_policy(
     hidden_sizes=(64, 32),
     epochs=10,
     learning_rate=0.02,
+    batch_size=32,
     l2=1e-4,
     seed=7,
 ):
@@ -88,30 +116,31 @@ def train_tiny_mlp_policy(
             sample_order = np.arange(len(chosen_indices))
             rng.shuffle(sample_order)
 
-            for sample_idx in sample_order:
-                start = int(offsets[sample_idx])
-                end = int(offsets[sample_idx + 1])
-                features = candidate_features[start:end]
-                if features.size == 0:
-                    continue
-
-                chosen_index = int(chosen_indices[sample_idx])
-                activations, pre_activations = _forward(features, weights, biases)
-                logits = activations[-1].reshape(-1)
-                logits = logits - np.max(logits)
+            for _, feature_batch, chosen_batch in _iter_bucket_batches(
+                candidate_features,
+                offsets,
+                chosen_indices,
+                sample_order,
+                max(1, int(batch_size)),
+            ):
+                activations, pre_activations = _forward(feature_batch, weights, biases)
+                logits = activations[-1].reshape(feature_batch.shape[0], feature_batch.shape[1])
+                logits = logits - np.max(logits, axis=1, keepdims=True)
                 probs = np.exp(logits)
-                probs = probs / np.sum(probs)
+                probs = probs / np.sum(probs, axis=1, keepdims=True)
 
                 l2_penalty = sum(float(np.sum(weight * weight)) for weight in weights)
-                total_loss += -np.log(max(float(probs[chosen_index]), 1e-8)) + 0.5 * l2 * l2_penalty
-                predicted = int(np.argmax(probs))
-                correct += int(predicted == chosen_index)
+                total_loss += float(
+                    np.sum(-np.log(np.maximum(probs[np.arange(len(chosen_batch)), chosen_batch], 1e-8)))
+                ) + 0.5 * l2 * l2_penalty * len(chosen_batch)
+                predicted = np.argmax(probs, axis=1)
+                correct += int(np.sum(predicted == chosen_batch))
 
-                grads_w, grads_b = _backward(activations, pre_activations, weights, probs, chosen_index, l2)
+                grads_w, grads_b = _backward_batch(activations, pre_activations, weights, probs, chosen_batch, l2)
                 for layer_index in range(len(weights)):
                     weights[layer_index] -= learning_rate * grads_w[layer_index].astype(np.float32)
                     biases[layer_index] -= learning_rate * grads_b[layer_index].astype(np.float32)
-                sample_count += 1
+                sample_count += len(chosen_batch)
 
         avg_loss = total_loss / max(1, sample_count)
         accuracy = correct / max(1, sample_count)
@@ -131,6 +160,7 @@ def main():
     parser.add_argument('--hidden-sizes', default='64,32', help='Comma-separated hidden layer sizes')
     parser.add_argument('--epochs', type=int, default=10, help='Training epochs')
     parser.add_argument('--learning-rate', type=float, default=0.02, help='SGD learning rate')
+    parser.add_argument('--batch-size', type=int, default=32, help='Mini-batch size within equal-action-count buckets')
     parser.add_argument('--l2', type=float, default=1e-4, help='L2 penalty')
     parser.add_argument('--seed', type=int, default=7, help='Random seed')
     args = parser.parse_args()
@@ -145,6 +175,7 @@ def main():
         hidden_sizes=hidden_sizes,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
         l2=args.l2,
         seed=args.seed,
     )

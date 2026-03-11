@@ -52,6 +52,25 @@ FEATURE_NAMES = [
     'target_forest',
     'target_mountain',
     'target_water',
+    'capital_threat_before',
+    'capital_threat_after',
+    'capital_threat_delta',
+    'capital_support_before',
+    'capital_support_after',
+    'capital_support_delta',
+    'capital_fatal_before',
+    'capital_fatal_after',
+    'priority_alignment_before',
+    'priority_alignment_after',
+    'priority_alignment_delta',
+    'forward_pressure_before',
+    'forward_pressure_after',
+    'forward_pressure_delta',
+    'to_local_support_before',
+    'to_local_support_after',
+    'to_local_support_delta',
+    'is_reverse_move',
+    'is_idle_neutral_drift',
 ]
 
 
@@ -150,6 +169,23 @@ def _adjacent_control_counts(game, pos, player):
     return friendly, enemy
 
 
+def _capital_metrics(game, player, board_state, analysis, turn_steps):
+    capital_pos = game.capitals.get(player)
+    if capital_pos is None:
+        return 0, 0, 0
+    cap_x, cap_y = capital_pos
+    capital_hp = int(board_state[cap_x, cap_y, 1])
+    capital_threat = game.get_max_enemy_threat_against(
+        player,
+        capital_pos,
+        board_state,
+        turn_steps,
+        analysis=analysis,
+    )
+    capital_support = game.get_local_friendly_hp(player, capital_pos, board_state, radius=2)
+    return capital_hp, int(capital_threat), int(capital_support)
+
+
 def extract_action_features(game, action, current_analysis=None, turn_steps=None):
     player = game.current_player
     from_pos = action.from_pos
@@ -203,6 +239,43 @@ def extract_action_features(game, action, current_analysis=None, turn_steps=None
     )
     friendly_adjacent, enemy_adjacent = _adjacent_control_counts(game, to_pos, player)
     target_has_mine = game.resource_map[x2, y2] == RESOURCE_GOLD_MINE
+    capital_hp_before, capital_threat_before, capital_support_before = _capital_metrics(
+        game,
+        player,
+        game.board,
+        current_analysis,
+        turn_steps,
+    )
+    capital_hp_after, capital_threat_after, capital_support_after = _capital_metrics(
+        game,
+        player,
+        simulated['board'],
+        simulated_analysis,
+        turn_steps,
+    )
+    priority_alignment_before = game.get_priority_alignment(
+        player,
+        from_pos,
+        game.board,
+        analysis=current_analysis,
+        turn_steps=turn_steps,
+    )
+    priority_alignment_after = game.get_priority_alignment(
+        player,
+        to_pos,
+        simulated['board'],
+        analysis=simulated_analysis,
+        turn_steps=turn_steps,
+    )
+    forward_pressure_before = game.count_forward_pressure(player, from_pos, game.board)
+    forward_pressure_after = game.count_forward_pressure(player, to_pos, simulated['board'])
+    to_local_support_before = game.get_local_friendly_hp(player, to_pos, game.board, radius=1)
+    to_local_support_after = game.get_local_friendly_hp(player, to_pos, simulated['board'], radius=1)
+    is_reverse_move = 1.0 if getattr(game, 'last_move', None) == (to_pos, from_pos) else 0.0
+    is_idle_neutral_drift = 0.0
+    if target_player == 0 and target_city_type == 0 and not target_has_mine:
+        if priority_alignment_after <= priority_alignment_before and forward_pressure_after <= forward_pressure_before:
+            is_idle_neutral_drift = 1.0
 
     features = [
         1.0,
@@ -236,4 +309,27 @@ def extract_action_features(game, action, current_analysis=None, turn_steps=None
     ]
     features.extend(_terrain_one_hot(source_terrain))
     features.extend(_terrain_one_hot(target_terrain))
+    features.extend(
+        [
+            float(capital_threat_before) / 99.0,
+            float(capital_threat_after) / 99.0,
+            float(capital_threat_before - capital_threat_after) / 99.0,
+            float(capital_support_before) / 198.0,
+            float(capital_support_after) / 198.0,
+            float(capital_support_after - capital_support_before) / 198.0,
+            1.0 if capital_threat_before >= max(1, capital_hp_before) else 0.0,
+            1.0 if capital_threat_after >= max(1, capital_hp_after) else 0.0,
+            float(priority_alignment_before) / 40.0,
+            float(priority_alignment_after) / 40.0,
+            float(priority_alignment_after - priority_alignment_before) / 40.0,
+            float(forward_pressure_before) / 12.0,
+            float(forward_pressure_after) / 12.0,
+            float(forward_pressure_after - forward_pressure_before) / 12.0,
+            float(to_local_support_before) / 198.0,
+            float(to_local_support_after) / 198.0,
+            float(to_local_support_after - to_local_support_before) / 198.0,
+            is_reverse_move,
+            is_idle_neutral_drift,
+        ]
+    )
     return np.asarray(features, dtype=np.float32)

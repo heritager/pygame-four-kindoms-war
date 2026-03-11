@@ -87,11 +87,11 @@ def record_expert_games(
                     break
                 continue
 
-            chosen_index = None
-            for idx, action in enumerate(actions):
-                if action.from_pos == chosen_action[0] and action.to_pos == chosen_action[1]:
-                    chosen_index = idx
-                    break
+            action_index_map = {
+                (action.from_pos, action.to_pos): idx
+                for idx, action in enumerate(actions)
+            }
+            chosen_index = action_index_map.get((chosen_action[0], chosen_action[1]))
 
             if chosen_index is None:
                 _, _, done, _ = env.pass_turn()

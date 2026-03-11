@@ -5,6 +5,19 @@ import numpy as np
 from .action_encoder import FEATURE_NAMES
 
 
+def _align_feature_matrix(feature_matrix, expected_dim):
+    feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
+    if feature_matrix.size == 0:
+        return feature_matrix
+    actual_dim = feature_matrix.shape[1]
+    if actual_dim == expected_dim:
+        return feature_matrix
+    if actual_dim > expected_dim:
+        return feature_matrix[:, :expected_dim]
+    padding = np.zeros((feature_matrix.shape[0], expected_dim - actual_dim), dtype=np.float32)
+    return np.concatenate([feature_matrix, padding], axis=1)
+
+
 class LinearActionPolicy:
     """A very small policy that scores legal actions with a single linear layer."""
 
@@ -19,7 +32,8 @@ class LinearActionPolicy:
     def score_candidates(self, feature_matrix):
         if feature_matrix.size == 0:
             return np.zeros((0,), dtype=np.float32)
-        return feature_matrix @ self.weights
+        aligned = _align_feature_matrix(feature_matrix, self.weights.shape[0])
+        return aligned @ self.weights
 
     def choose_index(self, feature_matrix):
         scores = self.score_candidates(feature_matrix)
@@ -55,7 +69,7 @@ class TinyMLPActionPolicy:
     def score_candidates(self, feature_matrix):
         if feature_matrix.size == 0:
             return np.zeros((0,), dtype=np.float32)
-        activations = np.asarray(feature_matrix, dtype=np.float32)
+        activations = _align_feature_matrix(feature_matrix, self.weights[0].shape[0])
         last_layer = len(self.weights) - 1
         for layer_index, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             activations = activations @ weight + bias
