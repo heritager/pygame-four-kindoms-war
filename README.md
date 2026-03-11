@@ -272,6 +272,13 @@
    python3 Single_Game.py
    ```
 
+## Google Colab 训练
+
+- 一键训练文档见：`COLAB_TRAINING.md`
+- 一键命令入口：`python -m four_kingdoms.ml.one_click_train`
+- 流程包含：专家数据采集 -> 模型训练 -> learned AI 基准评估
+- 推荐在 Colab 中把 `--dataset-dir`、`--output-model`、`--summary-json` 指向 Google Drive 目录
+
 ## 前端设计
 
 游戏包含精美的视觉效果：

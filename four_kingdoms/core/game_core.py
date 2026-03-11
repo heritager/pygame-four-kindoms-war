@@ -51,6 +51,9 @@ class _HeadlessRenderer:
     def mark_board_dirty(self):
         return None
 
+    def mark_units_dirty(self):
+        return None
+
     def add_combat_effect(self, pos, text):
         return None
 
